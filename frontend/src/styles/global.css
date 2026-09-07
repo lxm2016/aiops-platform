@@ -1,0 +1,145 @@
+/* ===== AIOps 深色科技风全局主题 ===== */
+:root {
+  --bg-deep: #060b18;
+  --bg-main: #0a1122;
+  --bg-card: #0e1a30;
+  --bg-card-hover: #12213c;
+  --border-tech: #1c2f4f;
+  --cyan: #00d4ff;
+  --blue: #2f7bff;
+  --green: #00e396;
+  --yellow: #ffb020;
+  --red: #ff4d5e;
+  --purple: #9b6bff;
+  --text-main: #dce8f8;
+  --text-sub: #7d92b5;
+
+  --el-color-primary: #2f7bff;
+  --el-bg-color: var(--bg-card);
+  --el-bg-color-overlay: #0e1a30;
+  --el-bg-color-page: var(--bg-main);
+  --el-text-color-primary: #dce8f8;
+  --el-text-color-regular: #b8c9e2;
+  --el-text-color-secondary: #7d92b5;
+  --el-border-color: #1c2f4f;
+  --el-border-color-light: #162744;
+  --el-border-color-lighter: #12213c;
+  --el-fill-color-blank: #0e1a30;
+  --el-fill-color-light: #12213c;
+  --el-mask-color: rgba(6, 11, 24, 0.8);
+}
+
+html,
+body {
+  background: var(--bg-deep);
+  color: var(--text-main);
+  font-family: 'PingFang SC', 'Microsoft YaHei', 'Segoe UI', sans-serif;
+}
+
+#app {
+  background: radial-gradient(1200px 600px at 80% -10%, rgba(47, 123, 255, 0.12), transparent),
+    radial-gradient(900px 500px at -10% 110%, rgba(0, 212, 255, 0.08), transparent),
+    var(--bg-main);
+}
+
+/* 卡片 */
+.tech-card {
+  background: linear-gradient(180deg, rgba(18, 33, 60, 0.9), rgba(14, 26, 48, 0.9));
+  border: 1px solid var(--border-tech);
+  border-radius: 10px;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.35);
+}
+
+.tech-card .el-card__header {
+  border-bottom: 1px solid var(--border-tech);
+  padding: 12px 16px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+/* 页面标题 */
+.page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.page-title {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text-main);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.page-title::before {
+  content: '';
+  width: 4px;
+  height: 18px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, var(--cyan), var(--blue));
+}
+
+/* 表格 */
+.el-table {
+  --el-table-bg-color: transparent;
+  --el-table-tr-bg-color: transparent;
+  --el-table-header-bg-color: rgba(18, 33, 60, 0.6);
+  --el-table-row-hover-bg-color: rgba(47, 123, 255, 0.08);
+  --el-table-border-color: #162744;
+  --el-table-text-color: #b8c9e2;
+  --el-table-header-text-color: #8fb0dd;
+}
+
+/* 对话框 */
+.el-dialog {
+  --el-dialog-bg-color: #0e1a30;
+  border: 1px solid var(--border-tech);
+  border-radius: 10px;
+}
+
+/* 菜单 */
+.el-menu {
+  border-right: none !important;
+}
+
+/* 滚动条 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #22375c;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* 描述列表 */
+.el-descriptions {
+  --el-descriptions-item-bordered-label-background: rgba(18, 33, 60, 0.6);
+}
+
+/* 输入控件统一深色 */
+.el-input__wrapper,
+.el-textarea__inner,
+.el-select .el-input__wrapper {
+  background-color: #0c1730 !important;
+  box-shadow: 0 0 0 1px #1c2f4f inset !important;
+}
+
+.el-input__wrapper:hover,
+.el-textarea__inner:hover {
+  box-shadow: 0 0 0 1px #2f7bff inset !important;
+}
+
+/* 数字高亮 */
+.num-highlight {
+  font-family: 'Consolas', 'JetBrains Mono', monospace;
+  font-weight: 700;
+}
