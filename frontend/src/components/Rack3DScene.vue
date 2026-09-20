@@ -22,7 +22,12 @@
         <div class="hc-title">{{ hoverInfo.name }}</div>
         <div class="hc-row" v-if="hoverInfo.row">列: <b>{{ hoverInfo.row }}</b></div>
         <div class="hc-row">高度: <b>{{ hoverInfo.uHeight }}U</b></div>
-        <div class="hc-row">设备: <b>{{ hoverInfo.deviceCount }}台</b></div>
+        <div class="hc-row">设备: <b>{{ hoverInfo.deviceCount }}台</b> · 已用 <b>{{ hoverInfo.usedU }}U</b></div>
+        <div class="hc-row">
+          状态:
+          <b :style="{ color: hoverInfo.statusCss }">{{ hoverInfo.statusText }}</b>
+          <span v-if="hoverInfo.alertCount" style="color:#ffb020"> · {{ hoverInfo.alertCount }}条告警</span>
+        </div>
         <div class="hc-tip">点击查看3D详情</div>
       </div>
     </transition>
@@ -62,7 +67,14 @@ let rackMeshes = [] // {rack, group, ledMeshes[]}
 let animationId = null
 let highlightRing = null
 
-const hoverInfo = reactive({ visible: false, x: 0, y: 0, name: '', row: '', uHeight: 0, deviceCount: 0 })
+const STATUS_TEXT = {
+  online: '正常', offline: '离线', warning: '告警', critical: '严重', unknown: '未纳管'
+}
+
+const hoverInfo = reactive({
+  visible: false, x: 0, y: 0, name: '', row: '', uHeight: 0, deviceCount: 0,
+  usedU: 0, statusText: '', statusCss: '#7d92b5', alertCount: 0
+})
 
 // 设备类型颜色
 const TYPE_COLOR = {
@@ -71,6 +83,43 @@ const TYPE_COLOR = {
   storage: 0xff9f43,
   security: 0xa55eea,
   other: 0x5d7092
+}
+
+// 状态色（机柜/设备共用）
+const STATUS_COLOR = {
+  online: 0x00e396,
+  offline: 0x4a5a70,
+  warning: 0xffb020,
+  critical: 0xff4d5e,
+  unknown: 0x5d7092
+}
+const STATUS_RANK = { unknown: 0, online: 1, offline: 2, warning: 3, critical: 4 }
+
+// 纹理缓存（机柜名标牌复用，避免重复创建 canvas）
+const texCache = new Map()
+
+function makeLabelTexture(key, w, h, draw) {
+  if (texCache.has(key)) return texCache.get(key)
+  const c = document.createElement('canvas')
+  c.width = w
+  c.height = h
+  draw(c.getContext('2d'), w, h)
+  const tex = new THREE.CanvasTexture(c)
+  tex.anisotropy = 4
+  tex.needsUpdate = true
+  texCache.set(key, tex)
+  return tex
+}
+
+/** 计算机柜整体状态：取其中设备的最高等级 */
+function rackStatus(rack) {
+  const devs = props.devicesMap[rack.id] || []
+  let best = 'unknown'
+  for (const d of devs) {
+    const s = d.status || 'unknown'
+    if ((STATUS_RANK[s] ?? 0) > (STATUS_RANK[best] ?? 0)) best = s
+  }
+  return rack.status || best
 }
 
 // ========== Three.js 场景初始化 ==========
@@ -253,12 +302,52 @@ function createRackModel(rack, position) {
   door.position.set(0, rackH / 2, rackD / 2 - 1)
   group.add(door)
 
-  // 机柜名称标牌(顶部蓝条)
-  const nameBarGeo = new THREE.PlaneGeometry(rackW - 4, 5)
-  const nameBarMat = new THREE.MeshBasicMaterial({ color: 0x00d4ff })
-  const nameBar = new THREE.Mesh(nameBarGeo, nameBarMat)
-  nameBar.position.set(0, rackH - 10, rackD / 2 - 0.5)
-  group.add(nameBar)
+  // 机柜名称标牌(带编号文字与状态条)
+  const st = rackStatus(rack)
+  const stHex = STATUS_COLOR[st] ?? STATUS_COLOR.unknown
+  const stCss = '#' + stHex.toString(16).padStart(6, '0')
+  const labelTex = makeLabelTexture(`rk-${rack.id}-${rack.name}-${st}`, 256, 64, (ctx, w2, h2) => {
+    ctx.fillStyle = '#0b182c'
+    ctx.fillRect(0, 0, w2, h2)
+    ctx.fillStyle = stCss
+    ctx.fillRect(0, 0, w2, 6)
+    ctx.strokeStyle = 'rgba(0,212,255,0.45)'
+    ctx.lineWidth = 2
+    ctx.strokeRect(1, 1, w2 - 2, h2 - 2)
+    ctx.fillStyle = '#dce8f8'
+    ctx.font = 'bold 30px sans-serif'
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    ctx.fillText(String(rack.name || ''), w2 / 2, h2 / 2 + 5)
+  })
+  const namePlate = new THREE.Mesh(
+    new THREE.PlaneGeometry(rackW - 6, 13),
+    new THREE.MeshBasicMaterial({ map: labelTex, transparent: true })
+  )
+  namePlate.position.set(0, rackH - 12, rackD / 2 - 0.4)
+  group.add(namePlate)
+
+  // 异常机柜: 用细边框 + 底部光条表达, 不整体染成告警色
+  // (大面积染色会让大屏长期刺眼, 这里采用克制的表达)
+  if (st === 'critical' || st === 'warning') {
+    const edge = new THREE.LineSegments(
+      new THREE.EdgesGeometry(new THREE.BoxGeometry(rackW + 5, rackH, rackD + 5)),
+      new THREE.LineBasicMaterial({
+        color: stHex,
+        transparent: true,
+        opacity: st === 'critical' ? 0.8 : 0.5
+      })
+    )
+    edge.position.set(0, rackH / 2, 0)
+    group.add(edge)
+
+    const bar = new THREE.Mesh(
+      new THREE.PlaneGeometry(rackW + 2, 3),
+      new THREE.MeshBasicMaterial({ color: stHex, transparent: true, opacity: 0.9 })
+    )
+    bar.position.set(0, 2, rackD / 2 + 0.3)
+    group.add(bar)
+  }
 
   // 设备面板
   const devices = (props.devicesMap[rack.id] || []).filter(d => d.side === 'front')
@@ -440,14 +529,21 @@ function onMouseMove(event) {
     const rackMesh = rackMeshes.find(rm => rm.group === obj || rm.group.children.includes(obj))
     if (rackMesh) {
       const rack = rackMesh.rack
-      const devCount = (props.devicesMap[rack.id] || []).length
+      const devs = props.devicesMap[rack.id] || []
+      const st = rackStatus(rack)
       hoverInfo.visible = true
       hoverInfo.x = event.clientX - rect.left + 15
       hoverInfo.y = event.clientY - rect.top + 15
       hoverInfo.name = rack.name
       hoverInfo.row = rack.row_name
       hoverInfo.uHeight = rack.u_height
-      hoverInfo.deviceCount = devCount
+      hoverInfo.deviceCount = devs.length
+      hoverInfo.usedU = devs
+        .filter(d => d.side === 'front')
+        .reduce((s, d) => s + (d.u_size || 1), 0)
+      hoverInfo.statusText = STATUS_TEXT[st] || '未纳管'
+      hoverInfo.statusCss = '#' + (STATUS_COLOR[st] ?? STATUS_COLOR.unknown).toString(16).padStart(6, '0')
+      hoverInfo.alertCount = devs.reduce((s, d) => s + (d.alert_count || 0), 0)
       renderer.domElement.style.cursor = 'pointer'
       return
     }
@@ -592,6 +688,8 @@ onBeforeUnmount(() => {
       containerRef.value.removeChild(renderer.domElement)
     }
   }
+  texCache.forEach(t => t.dispose())
+  texCache.clear()
   scene = null
   camera = null
   renderer = null

@@ -107,7 +107,8 @@ export const rackApi = {
   addDevice: (rackId, data) => http.post(`/racks/${rackId}/devices`, data),
   updateDevice: (deviceId, data) => http.put(`/racks/devices/${deviceId}`, data),
   removeDevice: (deviceId) => http.delete(`/racks/devices/${deviceId}`),
-  importDevices: (items) => http.post('/racks/devices/import', { items })
+  importDevices: (items) => http.post('/racks/devices/import', { items }),
+  overview: () => http.get('/racks/overview')
 }
 
 // ---------- 网络设备 ----------

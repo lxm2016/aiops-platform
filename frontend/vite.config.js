@@ -18,5 +18,22 @@ export default defineConfig({
         changeOrigin: true
       }
     }
+  },
+  build: {
+    chunkSizeWarningLimit: 1200,
+    rollupOptions: {
+      output: {
+        // 把体积大的第三方库拆成独立 chunk:
+        // three.js 只被机柜页使用, 拆开后可长期缓存, 也不再拖累其他页面的包体
+        manualChunks(id) {
+          if (!id.includes('node_modules')) return
+          if (id.includes('three')) return 'three'
+          if (id.includes('echarts') || id.includes('zrender')) return 'echarts'
+          if (id.includes('xlsx')) return 'xlsx'
+          if (id.includes('element-plus') || id.includes('@element-plus')) return 'element-plus'
+          return 'vendor'
+        }
+      }
+    }
   }
 })

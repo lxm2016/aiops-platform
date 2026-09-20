@@ -85,18 +85,31 @@
     </div>
 
     <!-- ============ 3D机柜详情抽屉 ============ -->
-    <el-drawer v-model="detailVisible" :title="`机柜 ${detailRack?.name || ''} · ${detailRack?.u_height || 0}U`" size="720px">
+    <el-drawer v-model="detailVisible" :title="`机柜 ${detailRack?.name || ''} · ${detailRack?.u_height || 0}U`" size="880px">
       <template v-if="detailRack">
         <div class="u-toolbar">
           <el-radio-group v-model="detailSide" size="small">
             <el-radio-button value="front">前侧</el-radio-button>
             <el-radio-button value="back">后侧</el-radio-button>
           </el-radio-group>
+          <el-radio-group v-model="detailView" size="small">
+            <el-radio-button value="3d">3D 视图</el-radio-button>
+            <el-radio-button value="2d">2D U位图</el-radio-button>
+          </el-radio-group>
           <el-button size="small" type="primary" :icon="Plus" @click="openDeviceDialog()">添加设备</el-button>
         </div>
 
-        <!-- 3D单机柜视图 -->
-        <div class="detail-3d-scene">
+        <!-- 真 3D 单机柜: 看 U 位刻度、设备面板、状态灯 -->
+        <RackDetail3D
+          v-if="detailView === '3d'"
+          :rack="detailRack"
+          :devices="detailDevices"
+          :side="detailSide"
+          @device-click="openDeviceDialog"
+        />
+
+        <!-- 2D U位图: 一屏看清 U 位占用 -->
+        <div v-else class="detail-3d-scene">
           <div class="detail-3d-rack">
             <div class="d-frame-top"></div>
             <div class="d-frame-bottom"></div>
@@ -142,7 +155,14 @@
 
         <div class="dev-table-title">设备清单（前后侧全部）</div>
         <el-table :data="detailDevices" size="small" border max-height="260">
-          <el-table-column prop="name" label="设备名称" min-width="120" />
+          <el-table-column prop="name" label="设备名称" min-width="110" />
+          <el-table-column label="状态" width="88">
+            <template #default="{ row }">
+              <span class="st-tag" :style="{ color: statusCss(row.status), borderColor: statusCss(row.status) }">
+                {{ statusText(row.status) }}
+              </span>
+            </template>
+          </el-table-column>
           <el-table-column label="类型" width="90">
             <template #default="{ row }">
               <el-tag size="small" effect="dark" :color="TYPE_COLOR_HEX[row.device_type]" style="border: none">
@@ -282,6 +302,7 @@ import { Plus, Refresh, Upload, Download, Grid, Search, FullScreen } from '@elem
 import * as XLSX from 'xlsx'
 import { rackApi } from '@/api'
 import Rack3DScene from '@/components/Rack3DScene.vue'
+import RackDetail3D from '@/components/RackDetail3D.vue'
 
 const D_U_ROW = 28
 
@@ -299,6 +320,14 @@ const TYPE_REV = {
   'server': 'server', 'switch': 'switch', 'storage': 'storage', 'security': 'security', 'other': 'other'
 }
 
+const STATUS_TEXT = { online: '在线', offline: '离线', warning: '告警', critical: '严重', unknown: '未纳管' }
+const STATUS_CSS = {
+  online: '#00e396', offline: '#4a5a70', warning: '#ffb020',
+  critical: '#ff4d5e', unknown: '#5d7092'
+}
+function statusText(s) { return STATUS_TEXT[s] || '未纳管' }
+function statusCss(s) { return STATUS_CSS[s] || STATUS_CSS.unknown }
+
 const loading = ref(false)
 const submitting = ref(false)
 const racks = ref([])
@@ -313,7 +342,7 @@ let patrolTimer = null
 
 const totalDevices = computed(() => Object.values(devicesMap.value).reduce((s, arr) => s + arr.length, 0))
 const allDevices = computed(() => Object.values(devicesMap.value).flat())
-const onlineCount = computed(() => allDevices.value.filter(d => d.status !== 'offline').length)
+const onlineCount = computed(() => allDevices.value.filter(d => d.status === 'online').length)
 const offlineCount = computed(() => allDevices.value.filter(d => d.status === 'offline').length)
 const warningCount = computed(() => allDevices.value.filter(d => d.status === 'warning' || d.status === 'critical').length)
 
@@ -367,9 +396,21 @@ function clearSearch() {
   searchRackId.value = null
 }
 
+const stats = ref(null)
+
 async function load() {
   loading.value = true
   try {
+    // 优先一次请求取回机柜+设备+统计(含状态联动), 避免逐柜请求的 N+1
+    try {
+      const ov = await rackApi.overview()
+      racks.value = ov.racks || []
+      devicesMap.value = ov.devices || {}
+      stats.value = ov.stats || null
+      return
+    } catch (e) {
+      // 后端较旧没有该接口时回退到逐柜请求
+    }
     racks.value = await rackApi.list()
     const entries = await Promise.all(
       racks.value.map(async (r) => [r.id, await rackApi.devices(r.id)])
@@ -428,6 +469,7 @@ async function deleteRack(rack) {
 const detailVisible = ref(false)
 const detailRack = ref(null)
 const detailSide = ref('front')
+const detailView = ref('3d')
 const devDialogVisible = ref(false)
 const devFormRef = ref(null)
 const devForm = reactive({
@@ -639,6 +681,7 @@ onBeforeUnmount(() => {
 
 .u-toolbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
 .dev-table-title { margin: 16px 0 8px; font-size: 13px; font-weight: 600; }
+.st-tag { display: inline-block; padding: 1px 7px; font-size: 11px; border: 1px solid; border-radius: 10px; line-height: 16px; }
 .form-tip { margin-left: 12px; font-size: 12px; color: var(--text-sub, #7d92b5); }
 .import-tip { font-size: 12px; color: var(--text-sub, #7d92b5); line-height: 1.8; padding: 10px 12px; border: 1px solid var(--border-tech, #1a2a44); border-radius: 6px; background: rgba(47, 123, 255, 0.04); }
 .import-errors { margin-top: 10px; max-height: 140px; overflow-y: auto; padding: 8px 12px; border: 1px solid rgba(245, 108, 108, 0.4); border-radius: 6px; background: rgba(245, 108, 108, 0.06); color: #f56c6c; font-size: 12px; line-height: 1.8; }
