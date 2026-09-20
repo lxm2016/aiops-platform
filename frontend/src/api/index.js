@@ -4,8 +4,12 @@ import router from '@/router'
 
 const http = axios.create({
   baseURL: '/api',
-  timeout: 60000
+  timeout: 30000, // 30秒超时(之前60秒太长)
 })
+
+// 网络错误重试: 最多重试2次, 间隔1秒
+const MAX_RETRY = 2
+const RETRY_DELAY = 1000
 
 // 请求拦截器：附加 Token
 http.interceptors.request.use((config) => {
@@ -13,21 +17,46 @@ http.interceptors.request.use((config) => {
   if (token) {
     config.headers.Authorization = `Bearer ${token}`
   }
+  // 标记重试次数
+  config._retryCount = config._retryCount || 0
   return config
 })
 
-// 响应拦截器：统一错误处理
+// 响应拦截器：统一错误处理 + 网络错误自动重试
 http.interceptors.response.use(
   (res) => res.data,
-  (err) => {
+  async (err) => {
+    const config = err.config || {}
     const status = err.response?.status
     const detail = err.response?.data?.detail
+
+    // 401: 登录过期
     if (status === 401) {
       localStorage.removeItem('token')
       if (router.currentRoute.value.path !== '/login') {
         router.push('/login')
         ElMessage.error('登录已过期，请重新登录')
       }
+      return Promise.reject(err)
+    }
+
+    // 网络错误/超时/502/503/504: 自动重试
+    const isRetryable =
+      err.code === 'ECONNABORTED' || // 超时
+      err.code === 'ERR_NETWORK' || // 网络错误
+      !err.response || // 无响应(连接失败)
+      [502, 503, 504].includes(status) // 网关错误
+
+    if (isRetryable && config._retryCount < MAX_RETRY) {
+      config._retryCount += 1
+      console.warn(`[axios] 请求失败, 第${config._retryCount}次重试: ${config.url || ''}`)
+      await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY))
+      return http(config)
+    }
+
+    // 重试耗尽或非重试错误
+    if (isRetryable) {
+      ElMessage.error('服务器响应超时，请稍后重试')
     } else {
       ElMessage.error(typeof detail === 'string' ? detail : `请求失败: ${err.message}`)
     }

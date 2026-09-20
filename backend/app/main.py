@@ -1,4 +1,5 @@
 """AIOps Platform - FastAPI application entry point."""
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -12,6 +13,12 @@ from app.services import llm_service
 from app.services.scheduler import start_scheduler
 
 settings = get_settings()
+
+# 配置日志: SNMP和服务调度信息输出到journalctl
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
 
 
 @asynccontextmanager

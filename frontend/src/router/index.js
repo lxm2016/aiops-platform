@@ -49,6 +49,12 @@ const routes = [
         meta: { title: '网络设备', icon: 'Connection' }
       },
       {
+        path: 'network/:id',
+        name: 'NetworkDetail',
+        component: () => import('@/views/NetworkDetail.vue'),
+        meta: { title: '网络设备详情', hidden: true }
+      },
+      {
         path: 'storage',
         name: 'Storage',
         component: () => import('@/views/Storage.vue'),

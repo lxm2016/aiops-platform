@@ -1,73 +1,91 @@
 <template>
-  <div v-loading="loading">
+  <div v-loading="loading" class="idc-page">
+    <!-- 顶部工具栏 -->
     <div class="page-header">
       <div class="page-title">机柜管理</div>
-      <div style="display: flex; gap: 10px">
+      <div style="display: flex; gap: 10px; align-items: center">
+        <el-input
+          v-model="searchKeyword"
+          placeholder="搜索设备名称/SN/IP定位"
+          :prefix-icon="Search"
+          style="width: 260px"
+          clearable
+          @keyup.enter="handleSearch"
+          @clear="clearSearch"
+        />
+        <el-tooltip content="大屏巡检模式" placement="bottom">
+          <el-button :icon="FullScreen" :type="bigScreen ? 'primary' : 'default'" @click="toggleBigScreen" />
+        </el-tooltip>
         <el-button type="primary" :icon="Plus" @click="openRackDialog()">添加机柜</el-button>
-        <el-button :icon="Upload" @click="openImport">Excel导入设备</el-button>
+        <el-button :icon="Upload" @click="openImport">Excel导入</el-button>
         <el-button :icon="Refresh" @click="load">刷新</el-button>
       </div>
     </div>
 
     <!-- 图例 -->
-    <div class="legend">
+    <div class="legend-bar">
       <span v-for="(label, t) in TYPE_MAP" :key="t" class="legend-item">
-        <i class="legend-dot" :class="'t-' + t"></i>{{ label }}
+        <i class="led-dot" :style="{ background: TYPE_COLOR_HEX[t] }"></i>{{ label }}
       </span>
-      <span class="legend-tip">点击机柜查看U位详情 · 同一U位支持前后侧各放一台设备</span>
+      <span class="legend-item"><i class="led-dot led-on"></i>在线</span>
+      <span class="legend-item"><i class="led-dot led-warn"></i>告警</span>
+      <span class="legend-tip">鼠标拖拽旋转 · 滚轮缩放 · 点击机柜进入3D详情 · 搜索定位设备</span>
     </div>
 
-    <el-empty v-if="!rows.length" description="暂无机柜，请先添加机柜或通过Excel导入设备" :image-size="80" />
+    <!-- 大屏模式信息条 -->
+    <transition name="slide-down">
+      <div v-if="bigScreen" class="bigscreen-bar">
+        <div class="bs-stat"><span class="bs-num">{{ racks.length }}</span><span class="bs-lbl">机柜</span></div>
+        <div class="bs-stat"><span class="bs-num">{{ totalDevices }}</span><span class="bs-lbl">设备</span></div>
+        <div class="bs-stat"><span class="bs-num" style="color:#00e396">{{ onlineCount }}</span><span class="bs-lbl">在线</span></div>
+        <div class="bs-stat"><span class="bs-num" style="color:#ff4d5e">{{ offlineCount }}</span><span class="bs-lbl">离线</span></div>
+        <div class="bs-stat"><span class="bs-num" style="color:#ffb020">{{ warningCount }}</span><span class="bs-lbl">告警</span></div>
+        <div class="bs-clock">{{ clockStr }}</div>
+      </div>
+    </transition>
 
-    <!-- 按列分组 -->
-    <div v-for="row in rows" :key="row.name" class="row-section">
-      <div class="row-title">
-        <el-icon color="#00d4ff"><Grid /></el-icon>
-        {{ row.name }}
-        <span class="row-count">{{ row.racks.length }} 个机柜</span>
+    <el-empty v-if="!racks.length" description="暂无机柜，请先添加机柜或通过Excel导入设备" :image-size="80" />
+
+    <!-- Three.js 3D机房场景 -->
+    <Rack3DScene
+      v-if="racks.length"
+      :racks="racks"
+      :devices-map="devicesMap"
+      :big-screen="bigScreen"
+      :highlight-rack-id="searchRackId"
+      @rack-click="openRackDetail"
+      @clear-search="clearSearch"
+    />
+
+    <!-- 机柜列表(表格视图，辅助管理) -->
+    <div v-if="racks.length" class="rack-list-section">
+      <div class="section-title">
+        <el-icon><Grid /></el-icon> 机柜列表
       </div>
-      <div class="rack-grid">
-        <div v-for="rack in row.racks" :key="rack.id" class="rack-3d-wrap">
-          <div class="rack-3d" @click="openRackDetail(rack)">
-            <div class="rack-cube">
-              <div class="face top"></div>
-              <div class="face side"></div>
-              <div class="face front">
-                <div class="rack-name-bar">{{ rack.name }}</div>
-                <div class="mini-u">
-                  <div
-                    v-for="d in frontDevices(rack.id)"
-                    :key="d.id"
-                    class="mini-dev"
-                    :class="'t-' + d.device_type"
-                    :style="miniStyle(rack, d)"
-                    :title="`${d.name} (${d.u_start}-${d.u_start + d.u_size - 1}U)`"
-                  ></div>
-                </div>
-                <div class="rack-bottom-bar">{{ rack.u_height }}U</div>
-              </div>
-            </div>
-          </div>
-          <div class="rack-actions">
-            <div class="rack-label">
-              {{ rack.name }} · {{ rack.u_height }}U · {{ (devicesMap[rack.id] || []).length }}台设备
-            </div>
-            <div>
-              <el-button link type="primary" size="small" @click.stop="openRackDetail(rack)">详情</el-button>
-              <el-button link size="small" @click.stop="openRackDialog(rack)">编辑</el-button>
-              <el-popconfirm title="删除机柜将同时删除其中所有设备，确定？" @confirm="deleteRack(rack)">
-                <template #reference>
-                  <el-button link type="danger" size="small" @click.stop>删除</el-button>
-                </template>
-              </el-popconfirm>
-            </div>
-          </div>
-        </div>
-      </div>
+      <el-table :data="racks" size="small" border>
+        <el-table-column prop="name" label="机柜编号" width="100" />
+        <el-table-column prop="row_name" label="所在列" width="90" />
+        <el-table-column prop="u_height" label="U数" width="60" />
+        <el-table-column label="设备数" width="70">
+          <template #default="{ row }">{{ (devicesMap[row.id] || []).length }}</template>
+        </el-table-column>
+        <el-table-column prop="remark" label="备注" min-width="120" show-overflow-tooltip />
+        <el-table-column label="操作" width="180" fixed="right">
+          <template #default="{ row }">
+            <el-button link type="primary" size="small" @click="openRackDetail(row)">3D详情</el-button>
+            <el-button link size="small" @click="openRackDialog(row)">编辑</el-button>
+            <el-popconfirm title="删除机柜将同时删除其中所有设备，确定？" @confirm="deleteRack(row)">
+              <template #reference>
+                <el-button link type="danger" size="small">删除</el-button>
+              </template>
+            </el-popconfirm>
+          </template>
+        </el-table-column>
+      </el-table>
     </div>
 
-    <!-- 机柜详情抽屉: U位图 -->
-    <el-drawer v-model="detailVisible" :title="`机柜 ${detailRack?.name || ''} · ${detailRack?.u_height || 0}U`" size="640px">
+    <!-- ============ 3D机柜详情抽屉 ============ -->
+    <el-drawer v-model="detailVisible" :title="`机柜 ${detailRack?.name || ''} · ${detailRack?.u_height || 0}U`" size="720px">
       <template v-if="detailRack">
         <div class="u-toolbar">
           <el-radio-group v-model="detailSide" size="small">
@@ -77,41 +95,57 @@
           <el-button size="small" type="primary" :icon="Plus" @click="openDeviceDialog()">添加设备</el-button>
         </div>
 
-        <div class="u-scroll">
-          <div class="u-body" :style="{ height: detailRack.u_height * U_ROW + 'px' }">
-            <div
-              v-for="u in descUnits"
-              :key="u"
-              class="u-row"
-              :style="{ top: (detailRack.u_height - u) * U_ROW + 'px', height: U_ROW + 'px' }"
-              @click="openDeviceDialog(null, u)"
-            >
-              <span class="u-num">{{ u }}</span>
+        <!-- 3D单机柜视图 -->
+        <div class="detail-3d-scene">
+          <div class="detail-3d-rack">
+            <div class="d-frame-top"></div>
+            <div class="d-frame-bottom"></div>
+            <div class="d-frame-left">
+              <div class="d-u-scale">
+                <span v-for="u in descUnits" :key="u" class="d-u-num">{{ u }}</span>
+              </div>
             </div>
-            <div
-              v-for="d in sideDevices"
-              :key="d.id"
-              class="u-dev"
-              :class="'t-' + d.device_type"
-              :style="devStyle(d)"
-              @click.stop="openDeviceDialog(d)"
-            >
-              <span class="u-dev-name">{{ d.name }}</span>
-              <span class="u-dev-info">
-                {{ TYPE_MAP[d.device_type] || d.device_type }} · {{ d.u_start }}-{{ d.u_start + d.u_size - 1 }}U
-                <template v-if="d.remark"> · {{ d.remark }}</template>
-              </span>
+            <div class="d-frame-right"></div>
+            <div class="d-device-area" :style="{ height: detailRack.u_height * D_U_ROW + 'px' }">
+              <div
+                v-for="u in descUnits"
+                :key="'grid-'+u"
+                class="d-u-grid"
+                :style="{ top: (detailRack.u_height - u) * D_U_ROW + 'px', height: D_U_ROW + 'px' }"
+                @click="openDeviceDialog(null, u)"
+              ></div>
+              <div
+                v-for="d in sideDevices"
+                :key="d.id"
+                class="d-device"
+                :class="'dev-' + d.device_type"
+                :style="detailDevStyle(d)"
+                @click.stop="openDeviceDialog(d)"
+              >
+                <div class="d-dev-panel">
+                  <div class="d-dev-leds">
+                    <span class="d-led" :class="devLedClass(d)"></span>
+                    <span class="d-led d-led-small"></span>
+                    <span class="d-led d-led-small"></span>
+                  </div>
+                  <div class="d-dev-info">
+                    <div class="d-dev-name">{{ d.name }}</div>
+                    <div class="d-dev-sub">{{ TYPE_MAP[d.device_type] || d.device_type }} · {{ d.u_start }}-{{ d.u_start + d.u_size - 1 }}U</div>
+                  </div>
+                  <div v-if="d.device_type === 'server'" class="d-vents"><i v-for="n in 6" :key="n"></i></div>
+                  <div v-if="d.device_type === 'switch'" class="d-ports"><i v-for="n in 8" :key="n"></i></div>
+                </div>
+              </div>
             </div>
           </div>
         </div>
 
-        <!-- 设备清单 -->
         <div class="dev-table-title">设备清单（前后侧全部）</div>
         <el-table :data="detailDevices" size="small" border max-height="260">
           <el-table-column prop="name" label="设备名称" min-width="120" />
           <el-table-column label="类型" width="90">
             <template #default="{ row }">
-              <el-tag size="small" effect="dark" :color="TYPE_COLOR[row.device_type]" style="border: none">
+              <el-tag size="small" effect="dark" :color="TYPE_COLOR_HEX[row.device_type]" style="border: none">
                 {{ TYPE_MAP[row.device_type] || row.device_type }}
               </el-tag>
             </template>
@@ -206,19 +240,13 @@
       </div>
       <div style="display: flex; gap: 10px; margin: 12px 0">
         <el-button size="small" :icon="Download" @click="downloadTemplate">下载导入模板</el-button>
-        <el-upload
-          :auto-upload="false"
-          :show-file-list="false"
-          accept=".xlsx,.xls"
-          :on-change="handleFileChange"
-        >
+        <el-upload :auto-upload="false" :show-file-list="false" accept=".xlsx,.xls" :on-change="handleFileChange">
           <el-button size="small" type="primary" :icon="Upload">选择Excel文件</el-button>
         </el-upload>
         <span v-if="importFileName" style="color: var(--text-sub); font-size: 12px; align-self: center">
           {{ importFileName }}（{{ importPreview.length }} 行）
         </span>
       </div>
-
       <el-table v-if="importPreview.length" :data="importPreview" size="small" border max-height="300">
         <el-table-column type="index" label="#" width="50" />
         <el-table-column prop="rack_name" label="机柜编号" width="90" />
@@ -234,11 +262,9 @@
         </el-table-column>
         <el-table-column prop="remark" label="备注" min-width="100" show-overflow-tooltip />
       </el-table>
-
       <div v-if="importErrors.length" class="import-errors">
         <div v-for="(e, i) in importErrors" :key="i">{{ e }}</div>
       </div>
-
       <template #footer>
         <el-button @click="importVisible = false">取消</el-button>
         <el-button type="primary" :loading="submitting" :disabled="!importPreview.length" @click="handleImport">
@@ -250,16 +276,17 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Plus, Refresh, Upload, Download, Grid } from '@element-plus/icons-vue'
+import { Plus, Refresh, Upload, Download, Grid, Search, FullScreen } from '@element-plus/icons-vue'
 import * as XLSX from 'xlsx'
 import { rackApi } from '@/api'
+import Rack3DScene from '@/components/Rack3DScene.vue'
 
-const U_ROW = 26 // U位图每行像素高度
+const D_U_ROW = 28
 
 const TYPE_MAP = { server: '服务器', switch: '交换机', storage: '存储', security: '安全设备', other: '其他' }
-const TYPE_COLOR = {
+const TYPE_COLOR_HEX = {
   server: '#2f7bff',
   switch: '#00c48f',
   storage: '#ff9f43',
@@ -275,9 +302,71 @@ const TYPE_REV = {
 const loading = ref(false)
 const submitting = ref(false)
 const racks = ref([])
-const devicesMap = ref({}) // rackId -> devices
+const devicesMap = ref({})
 
-// ---------- 数据加载 ----------
+const searchKeyword = ref('')
+const searchRackId = ref(null)
+const bigScreen = ref(false)
+const clockStr = ref('')
+let bsTimer = null
+let patrolTimer = null
+
+const totalDevices = computed(() => Object.values(devicesMap.value).reduce((s, arr) => s + arr.length, 0))
+const allDevices = computed(() => Object.values(devicesMap.value).flat())
+const onlineCount = computed(() => allDevices.value.filter(d => d.status !== 'offline').length)
+const offlineCount = computed(() => allDevices.value.filter(d => d.status === 'offline').length)
+const warningCount = computed(() => allDevices.value.filter(d => d.status === 'warning' || d.status === 'critical').length)
+
+function devLedClass(d) {
+  if (d.status === 'critical') return 'led-critical'
+  if (d.status === 'warning') return 'led-warn'
+  if (d.status === 'offline') return 'led-off'
+  return 'led-on'
+}
+
+function updateClock() {
+  const d = new Date()
+  const p = (n) => String(n).padStart(2, '0')
+  clockStr.value = `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+}
+
+function toggleBigScreen() {
+  bigScreen.value = !bigScreen.value
+  if (bigScreen.value) {
+    updateClock()
+    bsTimer = setInterval(updateClock, 1000)
+    patrolTimer = setInterval(() => load(), 30000)
+  } else {
+    clearInterval(bsTimer)
+    clearInterval(patrolTimer)
+  }
+}
+
+function handleSearch() {
+  const kw = searchKeyword.value.trim().toLowerCase()
+  if (!kw) { searchRackId.value = null; return }
+  for (const [rackId, devs] of Object.entries(devicesMap.value)) {
+    const found = devs.some(d =>
+      (d.name || '').toLowerCase().includes(kw) ||
+      (d.sn || '').toLowerCase().includes(kw) ||
+      (d.ip || '').toLowerCase().includes(kw) ||
+      (d.remark || '').toLowerCase().includes(kw)
+    )
+    if (found) {
+      searchRackId.value = parseInt(rackId)
+      ElMessage.success(`已定位到机柜 ${racks.value.find(r => r.id === parseInt(rackId))?.name || rackId}`)
+      return
+    }
+  }
+  ElMessage.warning('未找到匹配设备')
+  searchRackId.value = null
+}
+
+function clearSearch() {
+  searchKeyword.value = ''
+  searchRackId.value = null
+}
+
 async function load() {
   loading.value = true
   try {
@@ -291,28 +380,6 @@ async function load() {
   }
 }
 
-const rows = computed(() => {
-  const map = {}
-  for (const r of racks.value) {
-    const key = r.row_name || 'A'
-    ;(map[key] = map[key] || []).push(r)
-  }
-  return Object.keys(map)
-    .sort()
-    .map((name) => ({ name, racks: map[name].sort((a, b) => a.name.localeCompare(b.name)) }))
-})
-
-function frontDevices(rackId) {
-  return (devicesMap.value[rackId] || []).filter((d) => d.side === 'front')
-}
-
-function miniStyle(rack, d) {
-  const top = ((rack.u_height - (d.u_start + d.u_size - 1)) / rack.u_height) * 100
-  const height = (d.u_size / rack.u_height) * 100
-  return { top: top + '%', height: `calc(${height}% - 1px)` }
-}
-
-// ---------- 机柜增删改 ----------
 const rackDialogVisible = ref(false)
 const rackFormRef = ref(null)
 const rackForm = reactive({ id: null, name: '', row_name: 'A列', u_height: 42, remark: '' })
@@ -358,7 +425,6 @@ async function deleteRack(rack) {
   load()
 }
 
-// ---------- 机柜详情 / 设备增删改 ----------
 const detailVisible = ref(false)
 const detailRack = ref(null)
 const detailSide = ref('front')
@@ -386,9 +452,9 @@ const descUnits = computed(() => {
   return arr
 })
 
-function devStyle(d) {
-  const top = (detailRack.value.u_height - (d.u_start + d.u_size - 1)) * U_ROW
-  return { top: top + 'px', height: d.u_size * U_ROW - 2 + 'px' }
+function detailDevStyle(d) {
+  const top = (detailRack.value.u_height - (d.u_start + d.u_size - 1)) * D_U_ROW
+  return { top: top + 'px', height: d.u_size * D_U_ROW - 2 + 'px' }
 }
 
 function openRackDetail(rack) {
@@ -444,7 +510,7 @@ async function deleteDevice(device) {
   load()
 }
 
-// ---------- Excel导入 ----------
+// Excel导入
 const importVisible = ref(false)
 const importPreview = ref([])
 const importErrors = ref([])
@@ -460,8 +526,7 @@ function openImport() {
 function downloadTemplate() {
   const rows = [
     { '机柜编号': 'A01', '设备名称': '核心交换机-1', '设备类型': '交换机', '起始U位': 40, '占用U数': 1, '放置侧': '前', '备注': '核心层' },
-    { '机柜编号': 'A01', '设备名称': '数据库服务器-1', '设备类型': '服务器', '起始U位': 12, '占用U数': 2, '放置侧': '前', '备注': '' },
-    { '机柜编号': 'A01', '设备名称': '后端配线架', '设备类型': '其他', '起始U位': 12, '占用U数': 2, '放置侧': '后', '备注': '与前侧设备同U位' }
+    { '机柜编号': 'A01', '设备名称': '数据库服务器-1', '设备类型': '服务器', '起始U位': 12, '占用U数': 2, '放置侧': '前', '备注': '' }
   ]
   const ws = XLSX.utils.json_to_sheet(rows)
   const wb = XLSX.utils.book_new()
@@ -521,7 +586,7 @@ async function handleImport() {
     const res = await rackApi.importDevices(importPreview.value)
     if (res.errors?.length) {
       importErrors.value = res.errors
-      ElMessage.warning(`成功导入 ${res.success} 条，${res.errors.length} 条失败，详见错误列表`)
+      ElMessage.warning(`成功导入 ${res.success} 条，${res.errors.length} 条失败`)
     } else {
       ElMessage.success(`成功导入 ${res.success} 条设备`)
       importVisible.value = false
@@ -533,308 +598,84 @@ async function handleImport() {
 }
 
 onMounted(load)
+onBeforeUnmount(() => {
+  clearInterval(bsTimer)
+  clearInterval(patrolTimer)
+})
 </script>
 
 <style scoped>
-.legend {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  flex-wrap: wrap;
-  margin-bottom: 16px;
-  padding: 10px 14px;
-  border: 1px solid var(--border-tech);
-  border-radius: 6px;
-  background: rgba(47, 123, 255, 0.04);
-}
+.idc-page { min-height: 100%; }
 
-.legend-item {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  color: var(--text-sub);
+.legend-bar {
+  display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  margin-bottom: 16px; padding: 10px 14px;
+  border: 1px solid var(--border-tech, #1a2a44);
+  border-radius: 6px; background: rgba(47, 123, 255, 0.04);
 }
+.legend-item { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-sub, #7d92b5); }
+.led-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; box-shadow: 0 0 4px currentColor; }
+.led-on { background: #00e396; box-shadow: 0 0 6px #00e396; animation: led-breath 2s ease-in-out infinite; }
+.led-warn { background: #ffb020; box-shadow: 0 0 6px #ffb020; }
+.led-critical { background: #ff4d5e; box-shadow: 0 0 6px #ff4d5e; animation: led-breath 0.8s ease-in-out infinite; }
+.led-off { background: #4a5a70; }
+@keyframes led-breath { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+.legend-tip { margin-left: auto; font-size: 12px; color: var(--text-sub, #7d92b5); opacity: 0.75; }
 
-.legend-dot {
-  width: 12px;
-  height: 12px;
-  border-radius: 2px;
-  display: inline-block;
+.bigscreen-bar {
+  display: flex; align-items: center; gap: 32px; padding: 14px 24px; margin-bottom: 16px;
+  border: 1px solid rgba(0, 212, 255, 0.3); border-radius: 8px;
+  background: linear-gradient(135deg, rgba(0, 212, 255, 0.06), rgba(47, 123, 255, 0.04));
 }
+.bs-stat { display: flex; align-items: baseline; gap: 6px; }
+.bs-num { font-size: 28px; font-weight: 700; color: #00d4ff; font-family: 'Courier New', monospace; }
+.bs-lbl { font-size: 13px; color: var(--text-sub, #7d92b5); }
+.bs-clock { margin-left: auto; font-size: 16px; font-family: 'Courier New', monospace; color: #00d4ff; letter-spacing: 1px; }
+.slide-down-enter-active, .slide-down-leave-active { transition: all 0.3s; }
+.slide-down-enter-from, .slide-down-leave-to { opacity: 0; transform: translateY(-10px); }
 
-.legend-tip {
-  margin-left: auto;
-  font-size: 12px;
-  color: var(--text-sub);
-  opacity: 0.75;
-}
+.rack-list-section { margin-top: 20px; }
+.section-title { display: flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 600; margin-bottom: 12px; padding-left: 10px; border-left: 3px solid #00d4ff; }
 
-.row-section {
-  margin-bottom: 28px;
-}
+.u-toolbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.dev-table-title { margin: 16px 0 8px; font-size: 13px; font-weight: 600; }
+.form-tip { margin-left: 12px; font-size: 12px; color: var(--text-sub, #7d92b5); }
+.import-tip { font-size: 12px; color: var(--text-sub, #7d92b5); line-height: 1.8; padding: 10px 12px; border: 1px solid var(--border-tech, #1a2a44); border-radius: 6px; background: rgba(47, 123, 255, 0.04); }
+.import-errors { margin-top: 10px; max-height: 140px; overflow-y: auto; padding: 8px 12px; border: 1px solid rgba(245, 108, 108, 0.4); border-radius: 6px; background: rgba(245, 108, 108, 0.06); color: #f56c6c; font-size: 12px; line-height: 1.8; }
 
-.row-title {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 15px;
-  font-weight: 600;
-  margin-bottom: 14px;
-  padding-left: 10px;
-  border-left: 3px solid #00d4ff;
-}
+/* 3D单机柜详情视图 */
+.detail-3d-scene { background: linear-gradient(180deg, #060d1a, #03060e); border: 1px solid var(--border-tech, #1a2a44); border-radius: 8px; padding: 20px; margin-bottom: 16px; overflow-x: auto; }
+.detail-3d-rack { position: relative; margin: 0 auto; width: 260px; padding: 0 0 0 40px; }
+.d-frame-top { height: 12px; background: linear-gradient(180deg, #3a4a66, #1e2a42); border: 1px solid rgba(0, 212, 255, 0.3); border-radius: 2px 2px 0 0; }
+.d-frame-bottom { height: 12px; background: linear-gradient(180deg, #1e2a42, #0a1424); border: 1px solid rgba(47, 123, 255, 0.2); border-radius: 0 0 2px 2px; }
+.d-frame-left { position: absolute; left: 0; top: 12px; bottom: 12px; width: 40px; background: linear-gradient(90deg, #0a1424, #060a14); border: 1px solid rgba(47, 123, 255, 0.2); border-right: none; }
+.d-frame-right { position: absolute; right: 0; top: 12px; bottom: 12px; width: 8px; background: linear-gradient(90deg, #060a14, #0a1424); border: 1px solid rgba(47, 123, 255, 0.2); border-left: none; }
+.d-u-scale { position: absolute; right: 4px; top: 0; display: flex; flex-direction: column; align-items: flex-end; }
+.d-u-num { height: 28px; line-height: 28px; font-size: 9px; color: var(--text-sub, #7d92b5); font-family: 'Courier New', monospace; opacity: 0.6; }
+.d-device-area { position: relative; background: repeating-linear-gradient(180deg, rgba(125, 146, 181, 0.05) 0, rgba(125, 146, 181, 0.05) 1px, transparent 1px, transparent 28px), linear-gradient(180deg, #0d1830, #060d1a); border-left: 1px solid rgba(47, 123, 255, 0.15); border-right: 1px solid rgba(47, 123, 255, 0.15); }
+.d-u-grid { position: absolute; left: 0; right: 0; border-bottom: 1px dashed rgba(125, 146, 181, 0.15); cursor: pointer; }
+.d-u-grid:hover { background: rgba(47, 123, 255, 0.08); }
+.d-device { position: absolute; left: 2px; right: 2px; border-radius: 2px; cursor: pointer; overflow: hidden; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.1); transition: filter 0.15s, transform 0.15s; }
+.d-device:hover { filter: brightness(1.25); transform: translateX(2px); box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.15), 0 0 10px rgba(0, 212, 255, 0.2); }
+.d-dev-panel { height: 100%; display: flex; align-items: center; gap: 8px; padding: 0 10px; }
+.d-dev-leds { display: flex; align-items: center; gap: 3px; flex-shrink: 0; }
+.d-led { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
+.d-led-small { width: 4px; height: 4px; background: #2a3a50; }
+.d-led.led-on { background: #00e396; box-shadow: 0 0 4px #00e396; animation: led-breath 2s ease-in-out infinite; }
+.d-led.led-warn { background: #ffb020; box-shadow: 0 0 4px #ffb020; }
+.d-led.led-critical { background: #ff4d5e; box-shadow: 0 0 4px #ff4d5e; animation: led-breath 0.6s ease-in-out infinite; }
+.d-led.led-off { background: #4a5a70; }
+.d-dev-info { flex: 1; overflow: hidden; }
+.d-dev-name { font-size: 12px; font-weight: 600; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-shadow: 0 1px 2px rgba(0,0,0,0.5); }
+.d-dev-sub { font-size: 10px; color: rgba(255, 255, 255, 0.7); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.d-vents { display: flex; gap: 3px; flex-shrink: 0; }
+.d-vents i { width: 12px; height: 3px; background: rgba(0, 0, 0, 0.4); border-radius: 1px; display: inline-block; }
+.d-ports { display: flex; gap: 2px; flex-shrink: 0; }
+.d-ports i { width: 8px; height: 6px; background: rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.15); border-radius: 1px; display: inline-block; }
 
-.row-count {
-  font-size: 12px;
-  font-weight: 400;
-  color: var(--text-sub);
-}
-
-.rack-grid {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 34px;
-}
-
-/* ---------- 3D机柜 ---------- */
-.rack-3d-wrap {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 10px;
-}
-
-.rack-3d {
-  width: 170px;
-  height: 280px;
-  perspective: 900px;
-  cursor: pointer;
-}
-
-.rack-cube {
-  position: relative;
-  width: 100%;
-  height: 100%;
-  transform-style: preserve-3d;
-  transform: rotateX(-6deg) rotateY(-18deg);
-  transition: transform 0.3s;
-}
-
-.rack-3d:hover .rack-cube {
-  transform: rotateX(-4deg) rotateY(-8deg) scale(1.03);
-}
-
-.face {
-  position: absolute;
-  backface-visibility: hidden;
-}
-
-.face.front {
-  width: 170px;
-  height: 280px;
-  display: flex;
-  flex-direction: column;
-  background: linear-gradient(180deg, #16233b, #0c1524);
-  border: 1px solid rgba(47, 123, 255, 0.45);
-  box-shadow: inset 0 0 24px rgba(0, 212, 255, 0.06);
-}
-
-.face.side {
-  width: 34px;
-  height: 280px;
-  left: 170px;
-  top: 0;
-  background: linear-gradient(90deg, #0a1322, #060c16);
-  border: 1px solid rgba(47, 123, 255, 0.2);
-  transform-origin: left center;
-  transform: rotateY(90deg);
-}
-
-.face.top {
-  width: 170px;
-  height: 34px;
-  left: 0;
-  top: 0;
-  background: linear-gradient(180deg, #22385c, #16253f);
-  border: 1px solid rgba(47, 123, 255, 0.3);
-  transform-origin: center top;
-  transform: rotateX(-90deg);
-}
-
-.rack-name-bar {
-  height: 22px;
-  line-height: 22px;
-  text-align: center;
-  font-size: 12px;
-  font-weight: 600;
-  color: #00d4ff;
-  background: rgba(0, 212, 255, 0.08);
-  border-bottom: 1px solid rgba(47, 123, 255, 0.3);
-}
-
-.rack-bottom-bar {
-  height: 16px;
-  line-height: 16px;
-  text-align: center;
-  font-size: 10px;
-  color: var(--text-sub);
-  border-top: 1px solid rgba(47, 123, 255, 0.3);
-}
-
-.mini-u {
-  flex: 1;
-  position: relative;
-  margin: 3px 6px;
-  background: repeating-linear-gradient(
-    180deg,
-    rgba(125, 146, 181, 0.08) 0,
-    rgba(125, 146, 181, 0.08) 1px,
-    transparent 1px,
-    transparent 6px
-  );
-}
-
-.mini-dev {
-  position: absolute;
-  left: 1px;
-  right: 1px;
-  border-radius: 1px;
-  opacity: 0.92;
-}
-
-.rack-actions {
-  width: 170px;
-  text-align: center;
-}
-
-.rack-label {
-  font-size: 12px;
-  color: var(--text-sub);
-  margin-bottom: 2px;
-}
-
-/* ---------- 类型颜色 ---------- */
-.t-server { background: #2f7bff; }
-.t-switch { background: #00c48f; }
-.t-storage { background: #ff9f43; }
-.t-security { background: #a55eea; }
-.t-other { background: #5d7092; }
-
-/* ---------- U位图 ---------- */
-.u-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 12px;
-}
-
-.u-scroll {
-  max-height: 520px;
-  overflow-y: auto;
-  border: 1px solid var(--border-tech);
-  border-radius: 6px;
-  padding: 8px;
-  background: rgba(10, 18, 32, 0.5);
-}
-
-.u-body {
-  position: relative;
-  margin-left: 40px;
-  margin-right: 4px;
-}
-
-.u-row {
-  position: absolute;
-  left: 0;
-  right: 0;
-  border-bottom: 1px dashed rgba(125, 146, 181, 0.18);
-  cursor: pointer;
-}
-
-.u-row:hover {
-  background: rgba(47, 123, 255, 0.08);
-}
-
-.u-num {
-  position: absolute;
-  left: -36px;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 30px;
-  text-align: right;
-  font-size: 11px;
-  color: var(--text-sub);
-}
-
-.u-dev {
-  position: absolute;
-  left: 0;
-  right: 0;
-  border-radius: 3px;
-  padding: 2px 8px;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  overflow: hidden;
-  cursor: pointer;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
-  transition: filter 0.15s;
-}
-
-.u-dev:hover {
-  filter: brightness(1.2);
-}
-
-.u-dev-name {
-  font-size: 12px;
-  font-weight: 600;
-  color: #fff;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.u-dev-info {
-  font-size: 10px;
-  color: rgba(255, 255, 255, 0.75);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.dev-table-title {
-  margin: 16px 0 8px;
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.form-tip {
-  margin-left: 12px;
-  font-size: 12px;
-  color: var(--text-sub);
-}
-
-.import-tip {
-  font-size: 12px;
-  color: var(--text-sub);
-  line-height: 1.8;
-  padding: 10px 12px;
-  border: 1px solid var(--border-tech);
-  border-radius: 6px;
-  background: rgba(47, 123, 255, 0.04);
-}
-
-.import-errors {
-  margin-top: 10px;
-  max-height: 140px;
-  overflow-y: auto;
-  padding: 8px 12px;
-  border: 1px solid rgba(245, 108, 108, 0.4);
-  border-radius: 6px;
-  background: rgba(245, 108, 108, 0.06);
-  color: #f56c6c;
-  font-size: 12px;
-  line-height: 1.8;
-}
+.dev-server { background: linear-gradient(135deg, #2f7bff, #1a4db8); border-color: rgba(47, 123, 255, 0.6); }
+.dev-switch { background: linear-gradient(135deg, #00c48f, #008a60); border-color: rgba(0, 196, 143, 0.6); }
+.dev-storage { background: linear-gradient(135deg, #ff9f43, #cc6b00); border-color: rgba(255, 159, 67, 0.6); }
+.dev-security { background: linear-gradient(135deg, #a55eea, #6c3fb8); border-color: rgba(165, 94, 234, 0.6); }
+.dev-other { background: linear-gradient(135deg, #5d7092, #3a4a66); border-color: rgba(93, 112, 146, 0.6); }
 </style>

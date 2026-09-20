@@ -11,8 +11,20 @@
     <el-card class="tech-card" shadow="never">
       <el-table :data="devices" v-loading="loading">
         <el-table-column prop="id" label="ID" width="60" />
-        <el-table-column prop="name" label="名称" min-width="140" />
-        <el-table-column prop="ip" label="IP地址" width="140" />
+        <el-table-column label="名称" min-width="140">
+          <template #default="{ row }">
+            <el-button link type="primary" @click="goDetail(row)">
+              {{ row.name || row.ip }}
+            </el-button>
+          </template>
+        </el-table-column>
+        <el-table-column label="IP地址" width="140">
+          <template #default="{ row }">
+            <el-button link type="primary" @click="goDetail(row)">
+              {{ row.ip }}
+            </el-button>
+          </template>
+        </el-table-column>
         <el-table-column prop="vendor" label="厂商" width="100" />
         <el-table-column label="类型" width="90" align="center">
           <template #default="{ row }">
@@ -25,16 +37,6 @@
             <el-tag :type="statusTagType(row.status)" size="small" effect="dark">
               {{ statusLabel(row.status) }}
             </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="CPU%" width="130">
-          <template #default="{ row }">
-            <el-progress :percentage="Math.min(100, row.cpu_percent)" :color="percentColor(row.cpu_percent)" :stroke-width="8" />
-          </template>
-        </el-table-column>
-        <el-table-column label="内存%" width="130">
-          <template #default="{ row }">
-            <el-progress :percentage="Math.min(100, row.mem_percent)" :color="percentColor(row.mem_percent)" :stroke-width="8" />
           </template>
         </el-table-column>
         <el-table-column label="端口 (UP/总)" width="110" align="center">
@@ -183,11 +185,13 @@
 
 <script setup>
 import { ref, reactive, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Plus, Refresh } from '@element-plus/icons-vue'
 import { networkApi } from '@/api'
-import { formatTime, statusTagType, statusLabel, percentColor } from '@/utils/format'
+import { formatTime, statusTagType, statusLabel } from '@/utils/format'
 
+const router = useRouter()
 const devices = ref([])
 const loading = ref(false)
 const pollingId = ref(null)
@@ -195,6 +199,10 @@ const dialogVisible = ref(false)
 const submitting = ref(false)
 const formRef = ref(null)
 const editingId = ref(null)
+
+function goDetail(row) {
+  router.push(`/network/${row.id}`)
+}
 
 const form = reactive({
   name: '',

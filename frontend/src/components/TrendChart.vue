@@ -8,7 +8,8 @@ import * as echarts from 'echarts'
 
 const props = defineProps({
   option: { type: Object, default: () => ({}) },
-  height: { type: Number, default: 300 }
+  height: { type: Number, default: 300 },
+  clickHandlers: { type: Array, default: () => [] }  // echarts click handlers: [{ name, fn }]
 })
 
 const chartRef = ref(null)
@@ -33,6 +34,12 @@ function render() {
   const merged = { ...baseOption, ...props.option }
   if (props.option.tooltip) merged.tooltip = { ...baseOption.tooltip, ...props.option.tooltip }
   chart.setOption(merged, true)
+  // 注册点击事件
+  props.clickHandlers.forEach(h => {
+    if (h && h.name && typeof h.fn === 'function') {
+      chart.on('click', h.name, h.fn)
+    }
+  })
 }
 
 onMounted(async () => {

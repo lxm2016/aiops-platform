@@ -3,16 +3,16 @@
     <!-- 统计卡片 -->
     <el-row :gutter="16">
       <el-col :span="6">
-        <StatCard label="服务器总数" :value="summary.total" icon="Monitor" color="#00d4ff" />
+        <StatCard label="服务器总数" :value="summary.total" icon="Monitor" color="#00d4ff" to="/servers" />
       </el-col>
       <el-col :span="6">
-        <StatCard label="在线服务器" :value="summary.online" icon="CircleCheck" color="#00e396" />
+        <StatCard label="在线服务器" :value="summary.online" icon="CircleCheck" color="#00e396" to="/servers" :query="{ status: 'online' }" />
       </el-col>
       <el-col :span="6">
-        <StatCard label="离线服务器" :value="summary.offline" icon="CircleClose" color="#ff4d5e" />
+        <StatCard label="离线服务器" :value="summary.offline" icon="CircleClose" color="#ff4d5e" to="/servers" :query="{ status: 'offline' }" />
       </el-col>
       <el-col :span="6">
-        <StatCard label="未处理告警" :value="summary.open_alerts" icon="Bell" color="#ffb020" />
+        <StatCard label="未处理告警" :value="summary.open_alerts" icon="Bell" color="#ffb020" to="/alerts" :query="{ status: 'open' }" />
       </el-col>
     </el-row>
 
@@ -50,21 +50,21 @@
     <!-- 图表 -->
     <el-row :gutter="16" style="margin-top: 16px">
       <el-col :span="8">
-        <el-card class="tech-card" shadow="never">
-          <template #header>服务器状态分布</template>
-          <TrendChart :option="serverPieOption" :height="260" />
+        <el-card class="tech-card tech-card--link" shadow="never" @click="goServers">
+          <template #header>服务器状态分布 <span class="chart-hint">点击跳转</span></template>
+          <TrendChart :option="serverPieOption" :height="260" :clickHandlers="serverChartClickHandlers" />
         </el-card>
       </el-col>
       <el-col :span="8">
-        <el-card class="tech-card" shadow="never">
-          <template #header>告警级别分布</template>
-          <TrendChart :option="alertPieOption" :height="260" />
+        <el-card class="tech-card tech-card--link" shadow="never" @click="goAlerts">
+          <template #header>告警级别分布 <span class="chart-hint">点击跳转</span></template>
+          <TrendChart :option="alertPieOption" :height="260" :clickHandlers="alertChartClickHandlers" />
         </el-card>
       </el-col>
       <el-col :span="8">
-        <el-card class="tech-card" shadow="never">
-          <template #header>告警类别统计</template>
-          <TrendChart :option="alertBarOption" :height="260" />
+        <el-card class="tech-card tech-card--link" shadow="never" @click="goAlerts">
+          <template #header>告警类别统计 <span class="chart-hint">点击跳转</span></template>
+          <TrendChart :option="alertBarOption" :height="260" :clickHandlers="alertBarClickHandlers" />
         </el-card>
       </el-col>
     </el-row>
@@ -106,6 +106,7 @@
 
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { useRouter } from 'vue-router'
 import { serverApi, envApi, alertApi } from '@/api'
 import StatCard from '@/components/StatCard.vue'
 import TrendChart from '@/components/TrendChart.vue'
@@ -117,11 +118,56 @@ import {
   alertStatusLabel
 } from '@/utils/format'
 
+const router = useRouter()
 const summary = ref({ total: 0, online: 0, offline: 0, open_alerts: 0 })
 const sensors = ref([])
 const alerts = ref([])
 
 const recentAlerts = computed(() => alerts.value.slice(0, 8))
+
+// ---------- 跳转函数 ----------
+function goServers(status) {
+  router.push({ path: '/servers', query: status ? { status } : {} })
+}
+function goAlerts(query = {}) {
+  router.push({ path: '/alerts', query })
+}
+
+// ---------- 图表点击处理 ----------
+// 服务器饼图点击: 点"在线"跳在线服务器, 点"离线"跳离线服务器
+const serverChartClickHandlers = [
+  {
+    name: 'click',
+    fn: (params) => {
+      const map = { '在线': 'online', '离线': 'offline' }
+      goServers(map[params.name] || '')
+    }
+  }
+]
+
+// 告警级别饼图点击: 点某级别跳告警列表并筛选
+const alertChartClickHandlers = [
+  {
+    name: 'click',
+    fn: (params) => {
+      const levelMap = { '严重': 'critical', '警告': 'warning', '提示': 'info' }
+      const level = levelMap[params.name]
+      if (level) goAlerts({ level })
+    }
+  }
+]
+
+// 告警类别柱状图点击
+const alertBarClickHandlers = [
+  {
+    name: 'click',
+    fn: (params) => {
+      if (params.name && params.name !== '暂无告警') {
+        goAlerts({ category: params.name })
+      }
+    }
+  }
+]
 
 const serverPieOption = computed(() => ({
   tooltip: { trigger: 'item' },
@@ -282,5 +328,28 @@ onBeforeUnmount(() => {
   width: 1px;
   height: 40px;
   background: var(--border-tech);
+}
+
+.tech-card--link {
+  cursor: pointer;
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.tech-card--link:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 28px rgba(0, 212, 255, 0.12);
+  border-color: var(--accent, #00d4ff);
+}
+
+.chart-hint {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-sub);
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+.tech-card--link:hover .chart-hint {
+  opacity: 1;
 }
 </style>

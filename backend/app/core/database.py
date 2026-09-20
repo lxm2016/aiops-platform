@@ -1,6 +1,7 @@
 """Async SQLAlchemy database setup."""
 import sqlite3
 
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
 
@@ -8,8 +9,32 @@ from app.core.config import get_settings
 
 settings = get_settings()
 
-engine = create_async_engine(settings.database_url, echo=False, future=True)
+# SQLite需要特殊参数防止长时间不用后连接失效(502根因)
+_engine_kwargs = dict(echo=False, future=True)
+if settings.database_url.startswith("sqlite"):
+    _engine_kwargs["pool_pre_ping"] = True      # 检测失效连接并自动重建
+    _engine_kwargs["pool_recycle"] = 3600         # 每小时回收连接防止老化
+    _engine_kwargs["connect_args"] = {
+        "timeout": 30,       # busy_timeout: 等锁最多30秒而非立即报错
+        "check_same_thread": False,
+    }
+
+engine = create_async_engine(settings.database_url, **_engine_kwargs)
 AsyncSessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+# SQLite启用WAL模式: 允许并发读写, 长时间不用后不会锁死(502根因修复)
+@event.listens_for(engine.sync_engine, "connect")
+def _set_sqlite_pragma(dbapi_connection, connection_record):
+    if not settings.database_url.startswith("sqlite"):
+        return
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("PRAGMA journal_mode=WAL")     # WAL模式, 读写不互斥
+        cursor.execute("PRAGMA busy_timeout=30000")   # 等锁30秒
+        cursor.execute("PRAGMA synchronous=NORMAL")    # WAL下NORMAL足够安全
+        cursor.execute("PRAGMA cache_size=-64000")    # 64MB缓存
+    finally:
+        cursor.close()
 
 
 class Base(DeclarativeBase):

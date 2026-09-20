@@ -1,5 +1,6 @@
 """Background scheduler: periodic polling of network devices, offline detection."""
 import asyncio
+import logging
 from datetime import datetime, timedelta
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -13,6 +14,8 @@ from app.models import (
 from app.services.snmp_service import collect_network_device
 from app.services.storage_service import collect_storage
 from app.services.vmware_service import collect_vmware_data
+
+logger = logging.getLogger(__name__)
 
 scheduler = AsyncIOScheduler()
 
@@ -57,8 +60,8 @@ async def poll_all_network_devices():
                         d.last_seen = datetime.utcnow()
                         await upsert_ports(db, device.id, data["ports"])
                     await db.commit()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(f"[scheduler] 轮询网络设备 {device.ip} 失败: {e}", exc_info=True)
 
 
 async def poll_all_storage():
@@ -91,8 +94,8 @@ async def poll_all_storage():
                 else:
                     d.status = "offline"
                 await db.commit()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(f"[scheduler] 轮询存储设备 {device.ip} 失败: {e}", exc_info=True)
 
 
 async def sync_all_vmware():
@@ -118,8 +121,8 @@ async def sync_all_vmware():
                 await db.commit()
                 if data.get("vms"):
                     await upsert_vms(db, host.id, data["vms"])
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(f"[scheduler] 同步VMware {host.host} 失败: {e}", exc_info=True)
 
 
 async def cleanup_old_metrics():
