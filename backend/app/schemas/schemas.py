@@ -244,9 +244,121 @@ class AlertOut(BaseModel):
     status: str
     created_at: datetime
     resolved_at: Optional[datetime]
+    # 可配置告警规则改造后新增: 便于界面直接展示"当前值/命中次数/命中规则"
+    rule_id: Optional[int] = None
+    metric: Optional[str] = None
+    value: Optional[float] = None
+    hit_count: Optional[int] = None
 
     class Config:
         from_attributes = True
+
+
+# ---------- Alert rules (可配置告警规则) ----------
+class AlertRuleIn(BaseModel):
+    name: str
+    category: str = "server"          # server/network/storage/env/vmware
+    metric: str = "cpu_percent"
+    operator: str = "gte"             # gte(>=) / lte(<=)
+    warning_threshold: float = 80.0   # 提示阈值, 如 80
+    critical_threshold: float = 90.0  # 告警阈值, 如 90
+    duration_times: int = 1           # 连续命中N次才告警
+    silence_minutes: int = 30         # 静默期(分钟)
+    notify_levels: List[str] = ["warning", "critical"]
+    channel_ids: List[int] = []
+    enabled: bool = True
+    notify_on_recovery: bool = True
+    remark: str = ""
+
+
+class AlertRuleOut(BaseModel):
+    id: int
+    name: str
+    category: str
+    metric: str
+    operator: str
+    warning_threshold: float
+    critical_threshold: float
+    duration_times: int
+    silence_minutes: int
+    notify_levels: str
+    channel_ids: str
+    enabled: bool
+    notify_on_recovery: bool
+    remark: str
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+    # 派生字段(方便前端直接绑定多选框)
+    channel_ids_list: List[int] = []
+    notify_levels_list: List[str] = []
+
+    class Config:
+        from_attributes = True
+
+
+# ---------- Notify channels (通知渠道) ----------
+class NotifyChannelIn(BaseModel):
+    name: str
+    type: str = "dingtalk"            # dingtalk/wecom/sms/voice/webhook
+    enabled: bool = True
+    webhook_url: str = ""
+    secret: str = ""                  # 钉钉加签密钥
+    at_mobiles: str = ""
+    at_all: bool = False
+    targets: str = ""                 # 被叫号码(电话盒子/短信平台), 多个逗号分隔
+    http_method: str = "POST"
+    http_url: str = ""
+    http_headers: str = ""
+    http_body: str = ""
+    success_keyword: str = ""
+    timeout_seconds: int = 10
+    remark: str = ""
+
+
+class NotifyChannelOut(BaseModel):
+    id: int
+    name: str
+    type: str
+    enabled: bool
+    webhook_url: str
+    secret: str
+    at_mobiles: str
+    at_all: bool
+    targets: str
+    http_method: str
+    http_url: str
+    http_headers: str
+    http_body: str
+    success_keyword: str
+    timeout_seconds: int
+    remark: str
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class NotifyLogOut(BaseModel):
+    id: int
+    alert_id: Optional[int] = None
+    channel_id: Optional[int] = None
+    channel_name: str
+    channel_type: str
+    level: str
+    target: str
+    success: bool
+    response: str
+    error: str
+    sent_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class NotifyTestIn(BaseModel):
+    title: str = "AIOps 平台测试告警"
+    content: str = "这是一条测试消息, 用于验证通知渠道是否配置正确。"
 
 
 # ---------- Chat ----------

@@ -1,4 +1,5 @@
 """Server monitoring API: CRUD + agent metric ingestion + history."""
+import logging
 from datetime import datetime, timedelta
 from typing import List, Optional
 
@@ -12,10 +13,14 @@ from app.models import Server, ServerMetric, Alert
 from app.schemas.schemas import (
     ServerCreate, ServerOut, MetricReport, ServerMetricOut,
 )
-from app.services.alert_engine import evaluate_server_metrics
+from app.services.alert_engine import (
+    evaluate_server_metrics, evaluate_device_offline, flush_notifications,
+    invalidate_ip_cache,
+)
 
 router = APIRouter(prefix="/api/servers", tags=["servers"])
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 
 @router.get("", response_model=List[ServerOut])
@@ -45,6 +50,7 @@ async def create_server(data: ServerCreate, db: AsyncSession = Depends(get_db)):
     db.add(server)
     await db.commit()
     await db.refresh(server)
+    invalidate_ip_cache()          # 告警文案要按名字反查 IP, 缓存得失效
     return server
 
 
@@ -55,6 +61,7 @@ async def delete_server(server_id: int, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=404, detail="服务器不存在")
     await db.delete(server)
     await db.commit()
+    invalidate_ip_cache()
     return {"ok": True}
 
 
@@ -84,16 +91,44 @@ async def get_metrics(
         hours = min(max(hours, 1), 24 * 90)  # 最长支持查询90天
         since = datetime.utcnow() - timedelta(hours=hours)
         conditions.append(ServerMetric.collected_at >= since)
-    result = await db.execute(
-        select(ServerMetric)
-        .where(*conditions)
-        .order_by(ServerMetric.collected_at)
-    )
-    rows = result.scalars().all()
-    # 长时间范围自动降采样, 最多返回约2000个点, 避免前端图表卡死
-    step = max(1, len(rows) // 2000)
+    # ------------------------------------------------------------------
+    # 性能保护: 先数总量, 再决定是否在 SQL 层降采样。
+    # 旧实现是"全量查出来再在内存里切片", 当用户选 90 天时单台服务器就有
+    # 十几万行(每行还带 raw JSON), 会瞬间吃掉几百 MB 内存并长时间占住连接,
+    # 轻则接口超时, 重则被 OOM Killer 杀掉 —— 这也是"用着用着就卡死"的
+    # 原因之一。现在把采样下推到 SQL, 数据库只返回需要的行。
+    # ------------------------------------------------------------------
+    MAX_POINTS = 2000           # 前端最多画约 2000 个点
+    HARD_LIMIT = 4000           # 无论如何一次最多取 4000 行
+    total = (await db.execute(
+        select(func.count(ServerMetric.id)).where(*conditions)
+    )).scalar() or 0
+    step = max(1, total // MAX_POINTS)
+
+    stmt = select(ServerMetric).where(*conditions)
     if step > 1:
-        rows = rows[::step] + (rows[-1:] if (len(rows) - 1) % step else [])
+        # 用窗口函数按时间顺序均匀取点 (SQLite 3.25+ / MySQL 8+ / PG 均支持)
+        rn = func.row_number().over(order_by=ServerMetric.collected_at).label("rn")
+        sub = select(ServerMetric.id.label("mid"), rn).where(*conditions).subquery()
+        stmt = select(ServerMetric).where(
+            ServerMetric.id.in_(select(sub.c.mid).where(sub.c.rn % step == 0))
+        )
+    stmt = stmt.order_by(ServerMetric.collected_at).limit(HARD_LIMIT)
+
+    try:
+        rows = (await db.execute(stmt)).scalars().all()
+    except Exception:
+        # 老版本数据库不支持窗口函数: 回退为"硬限制行数 + 内存降采样"
+        await db.rollback()
+        rows = (await db.execute(
+            select(ServerMetric).where(*conditions)
+            .order_by(ServerMetric.collected_at).limit(HARD_LIMIT)
+        )).scalars().all()
+        rows = rows[::max(1, len(rows) // MAX_POINTS)]
+
+    if total > HARD_LIMIT:
+        logger.info(f"[metrics] server={server_id} 共 {total} 行, 已降采样为 {len(rows)} 个点返回")
+
     # 附加各分区磁盘历史 (从raw.disks提取, 供前端分区分开画线)
     out = []
     for r in rows:
@@ -146,8 +181,12 @@ async def report_metrics(
         await db.flush()
 
     # Update server info
+    was_offline = server.status != "online"
     server.status = "online"
     server.last_seen = datetime.utcnow()
+    # 重新上线: 自动关闭之前的离线告警 (只在状态真正变化时才查库, 避免每次上报都查)
+    if was_offline:
+        await evaluate_device_offline(db, "server", server.name, False)
     server.agent_installed = True
     if data.cpu_cores:
         server.cpu_cores = data.cpu_cores
@@ -182,9 +221,11 @@ async def report_metrics(
     )
     db.add(metric)
 
-    # Alert evaluation
+    # Alert evaluation (只入队告警与通知, 不在这时发送)
     await evaluate_server_metrics(db, server.name, data.model_dump())
     await db.commit()
+    # 事务提交后再发送通知: 若在事务内发送, 读渠道配置会撞上SQLite写锁白等30秒
+    await flush_notifications(db)
     return {"ok": True, "server_id": server.id}
 
 

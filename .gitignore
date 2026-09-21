@@ -2,6 +2,10 @@
 backend/.env
 backend/aiops.db
 *.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
 
 # Python
 backend/venv/
@@ -20,3 +24,7 @@ frontend/dist/
 # 系统文件
 Thumbs.db
 .DS_Store
+
+# 本地日志与构建临时文件
+_backend.log
+*.timestamp*.mjs

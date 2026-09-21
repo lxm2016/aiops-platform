@@ -13,6 +13,7 @@
           <el-option label="警告" value="warning" />
           <el-option label="提示" value="info" />
         </el-select>
+        <el-button :icon="Setting" @click="$router.push('/alerts/config')">告警配置</el-button>
         <el-button :icon="Refresh" @click="load">刷新</el-button>
       </div>
     </div>
@@ -33,6 +34,14 @@
           </template>
         </el-table-column>
         <el-table-column prop="source" label="来源" width="150" show-overflow-tooltip />
+        <el-table-column label="当前值" width="100" align="center">
+          <template #default="{ row }">
+            <span v-if="row.value !== null && row.value !== undefined" class="value-cell">
+              {{ formatValue(row.metric, row.value) }}
+            </span>
+            <span v-else class="muted">-</span>
+          </template>
+        </el-table-column>
         <el-table-column prop="title" label="标题" min-width="180" show-overflow-tooltip />
         <el-table-column prop="detail" label="详情" min-width="200" show-overflow-tooltip />
         <el-table-column label="状态" width="90" align="center">
@@ -106,10 +115,11 @@
 <script setup>
 import { ref, reactive, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Refresh, MagicStick } from '@element-plus/icons-vue'
+import { Refresh, MagicStick, Setting } from '@element-plus/icons-vue'
 import { alertApi } from '@/api'
 import {
   formatTime,
+  formatValue,
   alertLevelTag,
   alertLevelLabel,
   alertStatusTag,
@@ -181,6 +191,14 @@ onMounted(load)
   border-radius: 8px;
   padding: 14px 16px;
   min-height: 120px;
+}
+
+.value-cell {
+  font-weight: 600;
+  color: var(--el-color-danger);
+}
+.muted {
+  color: var(--el-text-color-secondary);
 }
 
 .analyze-result-title {

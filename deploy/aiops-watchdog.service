@@ -1,0 +1,10 @@
+[Unit]
+Description=AIOps Backend Watchdog (自动探测并重启卡死的后端)
+After=aiops-backend.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/aiops-deploy/scripts/aiops-watchdog.sh
+# 单次执行最长 90 秒 (探测 10s + 重启等待 20s, 留足余量)
+TimeoutStartSec=90
+Nice=10

@@ -1,9 +1,31 @@
 """SNMP-based collection for network devices (H3C / Huawei / Dell / Cisco switches).
 
-注意: 所有 get_cmd/next_cmd/walk_cmd 必须传 lookupMib=False, 否则 pysnmp7 会尝试
-加载本地 MIB 库解析 OID, 离线环境无 MIB 文件将导致 walk 全部失败。
+=======================================================================
+ 稳定性关键说明 (2026-09 修复"长时间运行后全站超时"根因)
+=======================================================================
+历史问题: 每次调用 snmp_get/snmp_walk 都新建一个 SnmpEngine(), 并且
+walk_cmd 的异步生成器在提前 return/break 时没有被关闭。
+
+实测证据 (tools/repro_leak.py, pysnmp 7.1.16):
+    - 旧写法: 30 次调用 -> 句柄 +37, asyncio 任务 +30 (永不回收)
+    - 新写法: 30 次调用 -> 句柄  +1, asyncio 任务  +1
+单台交换机一轮轮询约 8~10 次 SNMP 操作; 调度器每 2 分钟轮询一次全部设备。
+按 10 台交换机算, 旧写法每小时泄漏约 2700 个 fd 和 2700 个悬空 asyncio 任务,
+数小时内即耗尽 Linux 默认 1024 的文件描述符上限, 导致进程仍存活但所有
+HTTP 请求超时 (页面能打开、接口全挂), 必须重启服务才能恢复。
+
+本模块现在强制遵守两条铁律:
+    1. 全局复用唯一一个 SnmpEngine (不再每次 new);
+    2. 所有 walk_cmd 异步生成器一律用 contextlib.aclosing 包裹, 保证关闭;
+另外为每次 SNMP 操作增加了硬超时 (asyncio.wait_for) 与全局限流, 避免个别
+不可达设备把一轮轮询拖到几十分钟、造成定时任务堆积。
+
+注意: 所有 get_cmd/next_cmd/walk_cmd 必须传 lookupMib=False, 否则 pysnmp7
+会尝试加载本地 MIB 库解析 OID, 离线环境无 MIB 文件将导致 walk 全部失败。
 """
+import asyncio
 import logging
+from contextlib import aclosing
 from typing import Optional
 
 from pysnmp.hlapi.v3arch.asyncio import (
@@ -12,6 +34,113 @@ from pysnmp.hlapi.v3arch.asyncio import (
 )
 
 logger = logging.getLogger(__name__)
+
+# --------------------------------------------------------------------------
+# 超时与限流参数
+# --------------------------------------------------------------------------
+# 单次标量操作 (GET / GETNEXT) 的硬超时
+SINGLE_OP_TIMEOUT = 6.0
+# 单次 walk 表遍历的硬超时 (端口表较大的交换机需要更久)
+WALK_TIMEOUT = 25.0
+# 底层 UDP 层超时/重试 (pysnmp 自身)
+UDP_TIMEOUT = 3
+UDP_RETRIES = 1
+# 同时进行的 SNMP 操作上限, 防止瞬间打开过多句柄
+_MAX_CONCURRENT_OPS = 6
+# 单台设备一次采集的总超时 (含 sysName/sysDescr/CPU/内存/端口表)
+DEVICE_TIMEOUT = 75.0
+
+_op_semaphore: Optional[asyncio.Semaphore] = None
+
+
+def _sem() -> asyncio.Semaphore:
+    """并发信号量 (延迟创建并绑定当前事件循环)。"""
+    global _op_semaphore
+    loop = asyncio.get_running_loop()
+    if _op_semaphore is None or getattr(_op_semaphore, "_loop", loop) is not loop:
+        _op_semaphore = asyncio.Semaphore(_MAX_CONCURRENT_OPS)
+    return _op_semaphore
+
+
+# --------------------------------------------------------------------------
+# 全局唯一的 SnmpEngine
+# --------------------------------------------------------------------------
+_ENGINE: Optional[SnmpEngine] = None
+_ENGINE_LOOP: Optional[asyncio.AbstractEventLoop] = None
+_ENGINE_LOCK: Optional[asyncio.Lock] = None
+_TARGETS: dict = {}
+
+
+def _lock() -> asyncio.Lock:
+    global _ENGINE_LOCK
+    loop = asyncio.get_running_loop()
+    if _ENGINE_LOCK is None or getattr(_ENGINE_LOCK, "_loop", loop) is not loop:
+        _ENGINE_LOCK = asyncio.Lock()
+    return _ENGINE_LOCK
+
+
+async def get_engine() -> SnmpEngine:
+    """获取全局共享的 SnmpEngine (首次调用时创建)。
+
+    复用单个 engine 是 pysnmp 官方推荐做法: SnmpEngine 是重量级对象,
+    内部持有 transportDispatcher 与事件循环任务, 每次新建都会泄漏。
+    """
+    global _ENGINE, _ENGINE_LOOP
+    loop = asyncio.get_running_loop()
+    if _ENGINE is None or _ENGINE_LOOP is not loop:
+        async with _lock():
+            if _ENGINE is None or _ENGINE_LOOP is not loop:
+                await close_engine()
+                _ENGINE = SnmpEngine()
+                _ENGINE_LOOP = loop
+                logger.info("[SNMP] 已初始化共享 SnmpEngine (复用模式)")
+    return _ENGINE
+
+
+async def close_engine() -> None:
+    """关闭并释放 engine 持有的 socket / dispatcher (兼容不同 pysnmp 版本)。"""
+    global _ENGINE, _ENGINE_LOOP
+    engine, _ENGINE, _ENGINE_LOOP = _ENGINE, None, None
+    _TARGETS.clear()
+    if engine is None:
+        return
+    for closer in ("close_dispatcher", "aclose"):
+        fn = getattr(engine, closer, None)
+        if fn is None:
+            continue
+        try:
+            res = fn()
+            if asyncio.iscoroutine(res):
+                await res
+            logger.info("[SNMP] 共享 SnmpEngine 已关闭")
+            return
+        except Exception as e:  # pragma: no cover - 尽力而为
+            logger.debug(f"[SNMP] 关闭 engine 时 {closer} 失败: {e}")
+
+
+async def _target(ip: str) -> UdpTransportTarget:
+    """按 IP 缓存 transport target, 避免重复建对象。"""
+    key = (ip, UDP_TIMEOUT, UDP_RETRIES)
+    cached = _TARGETS.get(key)
+    if cached is not None:
+        return cached
+    target = await UdpTransportTarget.create(
+        (ip, 161), timeout=UDP_TIMEOUT, retries=UDP_RETRIES
+    )
+    if len(_TARGETS) > 500:      # 简单上限, 防止异常输入把缓存撑爆
+        _TARGETS.clear()
+    _TARGETS[key] = target
+    return target
+
+
+def stats() -> dict:
+    """供健康检查使用的诊断信息。"""
+    return {
+        "engine_ready": _ENGINE is not None,
+        "cached_targets": len(_TARGETS),
+        "max_concurrent_ops": _MAX_CONCURRENT_OPS,
+    }
+
 
 # Common OIDs
 OID_SYS_DESCR = "1.3.6.1.2.1.1.1.0"
@@ -75,29 +204,69 @@ def _community(community: str, version: str) -> CommunityData:
     return CommunityData(community, mpModel=1 if version == "2c" else 0)
 
 
-async def _target(ip: str) -> UdpTransportTarget:
-    return await UdpTransportTarget.create((ip, 161), timeout=5, retries=1)
+# --------------------------------------------------------------------------
+# 基础操作 (全部带硬超时 + 复用 engine + 关闭生成器)
+# --------------------------------------------------------------------------
+async def _do_get(ip: str, community: str, oid: str, version: str):
+    return await get_cmd(
+        await get_engine(),
+        _community(community, version),
+        await _target(ip),
+        ContextData(),
+        ObjectType(ObjectIdentity(oid)),
+        lookupMib=False,
+    )
 
 
 async def snmp_get(ip: str, community: str, oid: str, version: str = "2c") -> Optional[str]:
     """Perform a single SNMP GET (标量OID)。"""
     try:
-        error_indication, error_status, error_index, var_binds = await get_cmd(
-            SnmpEngine(),
-            _community(community, version),
-            await _target(ip),
-            ContextData(),
-            ObjectType(ObjectIdentity(oid)),
-            lookupMib=False,
-        )
+        async with _sem():
+            error_indication, error_status, error_index, var_binds = await asyncio.wait_for(
+                _do_get(ip, community, oid, version), timeout=SINGLE_OP_TIMEOUT
+            )
         if error_indication or error_status:
             logger.debug(f"[SNMP] GET {ip} {oid}: error={error_indication or error_status}")
             return None
         for var_bind in var_binds:
             return str(var_bind[1])
+    except asyncio.TimeoutError:
+        logger.debug(f"[SNMP] GET {ip} {oid}: 超时 {SINGLE_OP_TIMEOUT}s")
     except Exception as e:
         logger.debug(f"[SNMP] GET {ip} {oid}: exception={e}")
-        return None
+    return None
+
+
+async def _do_next(ip: str, community: str, oid: str, version: str):
+    return await next_cmd(
+        await get_engine(),
+        _community(community, version),
+        await _target(ip),
+        ContextData(),
+        ObjectType(ObjectIdentity(oid)),
+        lookupMib=False,
+    )
+
+
+async def _walk_first(ip: str, community: str, oid: str, version: str) -> Optional[str]:
+    """walk 取首条 (在 aclosing 内消费, 保证生成器被关闭)。"""
+    gen = walk_cmd(
+        await get_engine(),
+        _community(community, version),
+        await _target(ip),
+        ContextData(),
+        ObjectType(ObjectIdentity(oid)),
+        lexicographicMode=False,
+        lookupMib=False,
+    )
+    async with aclosing(gen):
+        async for (error_indication, error_status, error_index, var_binds) in gen:
+            if error_indication or error_status:
+                break
+            for var_bind in var_binds:
+                if str(var_bind[0]).startswith(oid):
+                    return str(var_bind[1])
+            break
     return None
 
 
@@ -110,14 +279,10 @@ async def snmp_get_next(ip: str, community: str, oid: str, version: str = "2c") 
     """
     # 方式1: next_cmd (pysnmp 7.x 普通协程)
     try:
-        error_indication, error_status, error_index, var_binds = await next_cmd(
-            SnmpEngine(),
-            _community(community, version),
-            await _target(ip),
-            ContextData(),
-            ObjectType(ObjectIdentity(oid)),
-            lookupMib=False,
-        )
+        async with _sem():
+            error_indication, error_status, error_index, var_binds = await asyncio.wait_for(
+                _do_next(ip, community, oid, version), timeout=SINGLE_OP_TIMEOUT
+            )
         if not error_indication and not error_status:
             for var_bind in var_binds:
                 if str(var_bind[0]).startswith(oid):
@@ -126,28 +291,22 @@ async def snmp_get_next(ip: str, community: str, oid: str, version: str = "2c") 
                     return val
         else:
             logger.debug(f"[SNMP] GETNEXT {ip} {oid}: error={error_indication or error_status}")
+    except asyncio.TimeoutError:
+        logger.debug(f"[SNMP] GETNEXT {ip} {oid}: 超时 {SINGLE_OP_TIMEOUT}s")
     except Exception as e:
         logger.debug(f"[SNMP] GETNEXT {ip} {oid}: exception={e}")
 
     # 方式2: 回退到 walk_cmd 取首条 (某些设备next_cmd行为不一致)
     try:
-        async for (error_indication, error_status, error_index, var_binds) in walk_cmd(
-            SnmpEngine(),
-            _community(community, version),
-            await _target(ip),
-            ContextData(),
-            ObjectType(ObjectIdentity(oid)),
-            lexicographicMode=False,
-            lookupMib=False,
-        ):
-            if error_indication or error_status:
-                break
-            for var_bind in var_binds:
-                if str(var_bind[0]).startswith(oid):
-                    val = str(var_bind[1])
-                    logger.debug(f"[SNMP] WALK-fallback {ip} {oid} -> {val}")
-                    return val
-            break  # 只取首条
+        async with _sem():
+            val = await asyncio.wait_for(
+                _walk_first(ip, community, oid, version), timeout=SINGLE_OP_TIMEOUT
+            )
+        if val is not None:
+            logger.debug(f"[SNMP] WALK-fallback {ip} {oid} -> {val}")
+            return val
+    except asyncio.TimeoutError:
+        logger.debug(f"[SNMP] WALK-fallback {ip} {oid}: 超时")
     except Exception as e:
         logger.debug(f"[SNMP] WALK-fallback {ip} {oid}: exception={e}")
 
@@ -168,23 +327,20 @@ async def _get_first_value(ip: str, community: str, oid_list: list, version: str
     return None
 
 
-async def snmp_walk(ip: str, community: str, oid: str, version: str = "2c") -> dict:
-    """Walk指定OID子树, 返回 {实例后缀: 值字符串}。
-
-    使用官方 walk_cmd 异步生成器(内部循环GETNEXT), lexicographicMode=False
-    限定在子树内; 不能对 next_cmd 用 async for (7.x 中它不是生成器)。
-    """
+async def _do_walk(ip: str, community: str, oid: str, version: str) -> dict:
+    """在 aclosing 保护下完整消费一次 walk。"""
     out = {}
-    try:
-        async for (error_indication, error_status, error_index, var_binds) in walk_cmd(
-            SnmpEngine(),
-            _community(community, version),
-            await _target(ip),
-            ContextData(),
-            ObjectType(ObjectIdentity(oid)),
-            lexicographicMode=False,
-            lookupMib=False,
-        ):
+    gen = walk_cmd(
+        await get_engine(),
+        _community(community, version),
+        await _target(ip),
+        ContextData(),
+        ObjectType(ObjectIdentity(oid)),
+        lexicographicMode=False,
+        lookupMib=False,
+    )
+    async with aclosing(gen):
+        async for (error_indication, error_status, error_index, var_binds) in gen:
             if error_indication or error_status:
                 break
             for var_bind in var_binds:
@@ -192,9 +348,25 @@ async def snmp_walk(ip: str, community: str, oid: str, version: str = "2c") -> d
                 if full_oid.startswith(oid + "."):
                     suffix = full_oid[len(oid) + 1:]
                     out[suffix] = str(var_bind[1])
+    return out
+
+
+async def snmp_walk(ip: str, community: str, oid: str, version: str = "2c") -> dict:
+    """Walk指定OID子树, 返回 {实例后缀: 值字符串}。
+
+    使用官方 walk_cmd 异步生成器(内部循环GETNEXT), lexicographicMode=False
+    限定在子树内; 外层超时保护, 超时会取消遍历并关闭生成器 (不泄漏)。
+    """
+    try:
+        async with _sem():
+            return await asyncio.wait_for(
+                _do_walk(ip, community, oid, version), timeout=WALK_TIMEOUT
+            )
+    except asyncio.TimeoutError:
+        logger.warning(f"[SNMP] WALK {ip} {oid}: 超时 {WALK_TIMEOUT}s, 已取消")
     except Exception as e:
         logger.debug(f"[SNMP] WALK {ip} {oid}: exception={e}")
-    return out
+    return {}
 
 
 async def walk_ports(ip: str, community: str, version: str = "2c") -> list:
@@ -265,21 +437,18 @@ def is_physical_port(name: str) -> bool:
     return not n.startswith(VIRTUAL_PORT_PREFIXES)
 
 
-async def collect_network_device(
-    ip: str, community: str = "public", vendor: str = "", version: str = "2c"
-) -> dict:
-    """Collect basic info + CPU/memory + port status from a network device."""
-    result = {
-        "ip": ip,
-        "reachable": False,
-        "sys_name": "",
-        "sys_descr": "",
-        "cpu_percent": 0.0,
-        "mem_percent": 0.0,
-        "port_total": 0,
-        "port_up": 0,
-        "ports": [],
+def _empty_result(ip: str) -> dict:
+    return {
+        "ip": ip, "reachable": False, "sys_name": "", "sys_descr": "",
+        "cpu_percent": 0.0, "mem_percent": 0.0, "port_total": 0,
+        "port_up": 0, "ports": [],
     }
+
+
+async def _collect_network_device_inner(
+    ip: str, community: str, vendor: str, version: str
+) -> dict:
+    result = _empty_result(ip)
 
     # Basic reachability via sysName
     sys_name = await snmp_get(ip, community, OID_SYS_NAME, version)
@@ -335,3 +504,24 @@ async def collect_network_device(
     result["port_up"] = sum(1 for p in physical if p["status"] == "up")
 
     return result
+
+
+async def collect_network_device(
+    ip: str, community: str = "public", vendor: str = "", version: str = "2c"
+) -> dict:
+    """Collect basic info + CPU/memory + port status from a network device.
+
+    带整体超时: 单台设备采集最长 DEVICE_TIMEOUT 秒, 超时返回不可达结果,
+    保证一轮轮询能被调度器控制在合理时长内 (避免任务堆积)。
+    """
+    try:
+        return await asyncio.wait_for(
+            _collect_network_device_inner(ip, community, vendor, version),
+            timeout=DEVICE_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(f"[SNMP] 设备 {ip} 采集整体超时({DEVICE_TIMEOUT}s), 标记离线")
+        return _empty_result(ip)
+    except Exception as e:
+        logger.error(f"[SNMP] 设备 {ip} 采集异常: {e}", exc_info=True)
+        return _empty_result(ip)

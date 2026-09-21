@@ -38,8 +38,33 @@
         </div>
 
       </el-header>
+      <!-- 连接状态横幅: 后端不可达/不健康时给出明确提示, 恢复后自动刷新页面数据 -->
+      <el-alert
+        v-if="!connState.online"
+        class="conn-banner"
+        type="error"
+        :closable="false"
+        show-icon
+      >
+        <template #title>
+          <span>与服务器连接中断{{ downText ? `（已断开 ${downText}）` : '' }}，系统正在自动重连…</span>
+          <span class="conn-hint">若长时间未恢复，请检查后端服务状态</span>
+        </template>
+      </el-alert>
+      <el-alert
+        v-else-if="connState.degraded"
+        class="conn-banner"
+        type="warning"
+        :closable="false"
+        show-icon
+      >
+        <template #title>
+          服务状态异常：{{ connState.lastMessage || '后端自检未通过，请查看服务日志' }}
+        </template>
+      </el-alert>
+
       <el-main class="main">
-        <router-view />
+        <router-view :key="viewKey" />
       </el-main>
     </el-container>
 
@@ -65,15 +90,52 @@
 </template>
 
 <script setup>
-import { computed, reactive, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { useAuthStore } from '@/stores/auth'
 import { authApi } from '@/api'
+import { connState } from '@/utils/connection'
 
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
+
+// ---------- 后端连接自愈 ----------
+// 页面隐藏时浏览器会节流定时器, 所以"长时间无操作"后回来, 数据往往是旧的
+// 甚至是加载失败的空白页。这里监听连接监视器广播的恢复事件, 一旦后端恢复
+// 就自动重新挂载当前路由组件, 让页面自己重新拉一次数据, 无需用户手动刷新。
+const refreshTick = ref(0)
+const viewKey = computed(() => `${route.fullPath}#${refreshTick.value}`)
+const nowTick = ref(Date.now())
+let clockTimer = null
+
+const downText = computed(() => {
+  void nowTick.value   // 依赖时钟, 让"已断开 xx 秒"实时变化
+  if (!connState.downSince) return ''
+  const s = Math.max(0, Math.round((nowTick.value - connState.downSince) / 1000))
+  if (s < 60) return `${s} 秒`
+  if (s < 3600) return `${Math.round(s / 60)} 分钟`
+  return `${Math.round(s / 3600)} 小时`
+})
+
+function onBackendRestored() {
+  ElMessage.success('已重新连接服务器，正在刷新数据')
+  refreshTick.value += 1
+}
+
+onMounted(() => {
+  window.addEventListener('aiops:backend-restored', onBackendRestored)
+  // 仅在断开时跑秒级时钟, 避免无谓的渲染开销
+  clockTimer = setInterval(() => {
+    if (!connState.online) nowTick.value = Date.now()
+  }, 1000)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('aiops:backend-restored', onBackendRestored)
+  if (clockTimer) clearInterval(clockTimer)
+})
 
 // ---------- 修改密码 ----------
 const pwdVisible = ref(false)
@@ -124,8 +186,9 @@ const menus = [
   { path: '/network', title: '网络设备', icon: 'Connection' },
   { path: '/storage', title: '存储设备', icon: 'Box' },
   { path: '/racks', title: '机柜管理', icon: 'Grid' },
-  { path: '/env', title: '温湿度监控', icon: 'Sunny' },
+  { path: '/env-devices', title: '动环设备', icon: 'Odometer' },
   { path: '/alerts', title: '告警中心', icon: 'Bell' },
+  { path: '/alerts/config', title: '告警配置', icon: 'Setting' },
   { path: '/ai', title: 'AI助手', icon: 'ChatDotRound' }
 ]
 
@@ -219,5 +282,15 @@ function handleLogout() {
 .main {
   padding: 16px;
   overflow-y: auto;
+}
+
+.conn-banner {
+  border-radius: 0;
+}
+
+.conn-hint {
+  margin-left: 12px;
+  opacity: 0.75;
+  font-size: 12px;
 }
 </style>

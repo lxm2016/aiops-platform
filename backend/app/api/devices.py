@@ -1,5 +1,5 @@
-"""Network device / storage / env sensor APIs."""
-from datetime import datetime, timedelta
+"""Network device / storage APIs."""
+from datetime import datetime
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -8,19 +8,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.models import (
-    NetworkDevice, SwitchPort, StorageDevice, EnvSensor, EnvReading,
+    NetworkDevice, SwitchPort, StorageDevice,
 )
 from app.schemas.schemas import (
     NetworkDeviceCreate, NetworkDeviceOut,
     StorageDeviceCreate, StorageDeviceOut,
-    EnvSensorCreate, EnvSensorOut, EnvReadingOut,
     PortRemarkIn,
 )
 from app.services.snmp_service import (
     collect_network_device, get_port_status,
 )
 from app.services.storage_service import collect_storage
-from app.services.alert_engine import evaluate_env_reading
+from app.services.alert_engine import flush_notifications
 
 router = APIRouter(prefix="/api", tags=["devices"])
 
@@ -255,76 +254,3 @@ async def poll_storage(device_id: int, db: AsyncSession = Depends(get_db)):
     await db.commit()
     detail = data.get("error") or "设备不可达或协议/凭据不正确"
     return {"ok": False, "detail": detail}
-
-
-# ---------- Env sensors ----------
-@router.get("/env", response_model=List[EnvSensorOut])
-async def list_env_sensors(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(EnvSensor).order_by(EnvSensor.id))
-    return result.scalars().all()
-
-
-@router.post("/env", response_model=EnvSensorOut)
-async def add_env_sensor(data: EnvSensorCreate, db: AsyncSession = Depends(get_db)):
-    sensor = EnvSensor(**data.model_dump())
-    db.add(sensor)
-    await db.commit()
-    await db.refresh(sensor)
-    return sensor
-
-
-@router.delete("/env/{sensor_id}")
-async def delete_env_sensor(sensor_id: int, db: AsyncSession = Depends(get_db)):
-    sensor = await db.get(EnvSensor, sensor_id)
-    if not sensor:
-        raise HTTPException(status_code=404, detail="不存在")
-    await db.delete(sensor)
-    await db.commit()
-    return {"ok": True}
-
-
-@router.post("/env/{sensor_id}/push")
-async def push_env_reading(
-    sensor_id: int,
-    temperature: Optional[float] = None,
-    humidity: Optional[float] = None,
-    db: AsyncSession = Depends(get_db),
-):
-    """External sensor gateway pushes readings here (or manual entry)."""
-    sensor = await db.get(EnvSensor, sensor_id)
-    if not sensor:
-        raise HTTPException(status_code=404, detail="不存在")
-
-    sensor.temperature = temperature
-    sensor.humidity = humidity
-    sensor.status = "online"
-    sensor.last_seen = datetime.utcnow()
-
-    db.add(EnvReading(
-        sensor_id=sensor_id,
-        temperature=temperature,
-        humidity=humidity,
-        collected_at=datetime.utcnow(),
-    ))
-    await evaluate_env_reading(db, sensor.name, temperature, humidity)
-    await db.commit()
-    return {"ok": True}
-
-
-@router.get("/env/{sensor_id}/history", response_model=List[EnvReadingOut])
-async def env_history(
-    sensor_id: int, hours: int = 24, db: AsyncSession = Depends(get_db)
-):
-    hours = min(max(hours, 1), 24 * 90)  # 最长支持查询90天
-    since = datetime.utcnow() - timedelta(hours=hours)
-    result = await db.execute(
-        select(EnvReading)
-        .where(EnvReading.sensor_id == sensor_id, EnvReading.collected_at >= since)
-        .order_by(EnvReading.collected_at)
-    )
-    rows = result.scalars().all()
-    # 长时间范围自动降采样, 最多返回约2000个点
-    step = max(1, len(rows) // 2000)
-    if step > 1:
-        rows = rows[::step] + (rows[-1:] if (len(rows) - 1) % step else [])
-    return rows

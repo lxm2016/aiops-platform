@@ -67,16 +67,22 @@ const routes = [
         meta: { title: '机柜管理', icon: 'Grid' }
       },
       {
-        path: 'env',
-        name: 'Env',
-        component: () => import('@/views/EnvMonitor.vue'),
-        meta: { title: '温湿度监控', icon: 'Sunny' }
+        path: 'env-devices',
+        name: 'EnvDevices',
+        component: () => import('@/views/EnvDevices.vue'),
+        meta: { title: '动环设备', icon: 'Odometer' }
       },
       {
         path: 'alerts',
         name: 'Alerts',
         component: () => import('@/views/Alerts.vue'),
         meta: { title: '告警中心', icon: 'Bell' }
+      },
+      {
+        path: 'alerts/config',
+        name: 'AlertConfig',
+        component: () => import('@/views/AlertConfig.vue'),
+        meta: { title: '告警配置', icon: 'Setting' }
       },
       {
         path: 'ai',

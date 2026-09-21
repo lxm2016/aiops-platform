@@ -5,6 +5,7 @@ LLM 配置支持运行时修改: 数据库 system_config 表优先, 未配置时
 """
 from typing import List, Optional, Tuple
 
+import httpx
 from openai import AsyncOpenAI
 
 from app.core.config import get_settings
@@ -51,12 +52,37 @@ async def reload_config():
     _runtime["api_key"] = stored.get("llm_api_key") or settings.llm_api_key
 
 
+# 按 (地址, 密钥) 缓存客户端。
+# 之前每次对话都 new 一个 AsyncOpenAI —— 它内部持有 httpx 连接池, 频繁创建会
+# 泄漏连接(与 SNMP 引擎泄漏是同一类问题)。这里改为复用。
+_CLIENTS: dict = {}
+
+
 def _get_client(base_url: Optional[str] = None, api_key: Optional[str] = None) -> AsyncOpenAI:
-    return AsyncOpenAI(
-        base_url=base_url or _runtime["base_url"],
-        api_key=api_key or _runtime["api_key"],
-        timeout=120.0,
-    )
+    url = base_url or _runtime["base_url"]
+    key = api_key or _runtime["api_key"]
+    cache_key = (url, key)
+    client = _CLIENTS.get(cache_key)
+    if client is None:
+        client = AsyncOpenAI(
+            base_url=url,
+            api_key=key,
+            timeout=120.0,
+            # trust_env=False: 内网大模型服务必须直连, 不能走服务器上的代理
+            http_client=httpx.AsyncClient(trust_env=False, timeout=130.0),
+        )
+        _CLIENTS[cache_key] = client
+    return client
+
+
+async def aclose_clients():
+    """优雅关闭时释放 LLM 客户端连接。"""
+    for client in list(_CLIENTS.values()):
+        try:
+            await client.close()
+        except Exception:
+            pass
+    _CLIENTS.clear()
 
 
 async def chat_completion(
@@ -98,15 +124,18 @@ async def chat_completion(
 async def test_connection(base_url: str, api_key: str, model: str) -> Tuple[bool, str]:
     """用指定配置实际调用一次模型, 验证连通性。"""
     try:
-        client = AsyncOpenAI(
-            base_url=base_url, api_key=api_key or "EMPTY", timeout=30.0
-        )
-        resp = await client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": "你好"}],
-            temperature=0.3,
-            max_tokens=16,
-        )
+        # 测试用独立客户端, 用完立即关闭, 不进缓存
+        async with httpx.AsyncClient(trust_env=False, timeout=35.0) as hc:
+            client = AsyncOpenAI(
+                base_url=base_url, api_key=api_key or "EMPTY",
+                timeout=30.0, http_client=hc,
+            )
+            resp = await client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": "你好"}],
+                temperature=0.3,
+                max_tokens=16,
+            )
         return True, f"连接成功，模型 {model} 响应正常"
     except Exception as e:
         return False, f"连接失败: {e}"

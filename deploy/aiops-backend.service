@@ -1,0 +1,54 @@
+[Unit]
+Description=AIOps Backend Service
+Documentation=http://127.0.0.1/api/health
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/aiops-deploy/backend
+
+# ---------------------------------------------------------------------------
+# 关键启动参数说明 (2026-09 修复"长时间无操作后全站超时")
+#   --workers 1          单进程。原配置是 --workers 2, 会导致:
+#                        ① 两个进程各自跑一份 APScheduler, SNMP/VMware 轮询双倍执行;
+#                        ② SQLite 只有一个写锁, 两进程争抢更容易超时。
+#                        本平台是 IO 密集型 + SQLite, 单进程 async 完全够用。
+#   --timeout-keep-alive 75   必须大于 nginx upstream keepalive_timeout(55s)。
+#                        否则后端会先关掉空闲连接, nginx 复用这条已关闭的连接,
+#                        用户闲置一段时间后第一次点击就会 502/超时。
+#   --limit-concurrency  200  允许的并发连接上限。
+#   --backlog 512        等待队列长度。
+# ---------------------------------------------------------------------------
+ExecStart=/opt/aiops-deploy/backend/venv/bin/python -m uvicorn app.main:app \
+    --host 0.0.0.0 --port 8080 \
+    --workers 1 \
+    --timeout-keep-alive 75 \
+    --limit-concurrency 200 \
+    --backlog 512 \
+    --timeout-graceful-shutdown 30
+
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+
+# 崩溃自动拉起
+Restart=always
+RestartSec=3
+# 最多 5 分钟内重启 10 次, 避免配置错误时疯狂重启
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+# 提高文件描述符上限 —— SNMP/HTTP 都是 fd 大户, 默认 1024 太小
+LimitNOFILE=65535
+
+# 日志进 journald, 便于 journalctl -u aiops-backend 排查
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=aiops-backend
+
+# 资源记账 (便于用 systemd-cgtop 观察)
+MemoryAccounting=yes
+CPUAccounting=yes
+
+[Install]
+WantedBy=multi-user.target

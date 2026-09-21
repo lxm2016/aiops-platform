@@ -1,0 +1,12 @@
+[Unit]
+Description=Run AIOps Backend Watchdog every 30 seconds
+
+[Timer]
+# 开机 90 秒后开始
+OnBootSec=90
+# 上次执行结束后 30 秒再执行一次
+OnUnitActiveSec=30
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

@@ -16,34 +16,16 @@
       </el-col>
     </el-row>
 
-    <!-- 温湿度 -->
+    <!-- 动环设备概览 -->
     <el-row :gutter="16" style="margin-top: 16px">
-      <el-col v-for="s in sensors" :key="s.id" :span="8">
-        <div class="tech-card env-card">
-          <div class="env-name">
-            <el-icon color="#00d4ff"><Sunny /></el-icon>
-            {{ s.name }}
-            <span class="env-loc">{{ s.location }}</span>
-          </div>
-          <div class="env-values">
-            <div class="env-item">
-              <div class="env-num num-highlight" style="color: #ffb020">
-                {{ s.temperature ?? '--' }}<span class="env-unit">°C</span>
-              </div>
-              <div class="env-label">温度</div>
-            </div>
-            <div class="env-divider"></div>
-            <div class="env-item">
-              <div class="env-num num-highlight" style="color: #00d4ff">
-                {{ s.humidity ?? '--' }}<span class="env-unit">%</span>
-              </div>
-              <div class="env-label">湿度</div>
-            </div>
-          </div>
-        </div>
+      <el-col :span="8">
+        <StatCard label="动环设备总数" :value="envSummary.devices" icon="Odometer" color="#2f7bff" to="/env-devices" />
       </el-col>
-      <el-col v-if="!sensors.length" :span="24">
-        <el-empty description="暂无温湿度传感器数据" :image-size="60" />
+      <el-col :span="8">
+        <StatCard label="在线设备" :value="envSummary.devices_online" icon="CircleCheck" color="#00e396" to="/env-devices" />
+      </el-col>
+      <el-col :span="8">
+        <StatCard label="告警点位" :value="envSummary.points_alarm" icon="Warning" color="#ffb020" to="/env-devices" />
       </el-col>
     </el-row>
 
@@ -107,7 +89,7 @@
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useRouter } from 'vue-router'
-import { serverApi, envApi, alertApi } from '@/api'
+import { serverApi, envDeviceApi, alertApi } from '@/api'
 import StatCard from '@/components/StatCard.vue'
 import TrendChart from '@/components/TrendChart.vue'
 import {
@@ -120,7 +102,7 @@ import {
 
 const router = useRouter()
 const summary = ref({ total: 0, online: 0, offline: 0, open_alerts: 0 })
-const sensors = ref([])
+const envSummary = ref({})
 const alerts = ref([])
 
 const recentAlerts = computed(() => alerts.value.slice(0, 8))
@@ -258,11 +240,11 @@ async function loadAll() {
   try {
     const [s, e, a] = await Promise.allSettled([
       serverApi.summary(),
-      envApi.list(),
+      envDeviceApi.summary(),
       alertApi.list({ limit: 100 })
     ])
     if (s.status === 'fulfilled') summary.value = s.value
-    if (e.status === 'fulfilled') sensors.value = e.value
+    if (e.status === 'fulfilled') envSummary.value = e.value
     if (a.status === 'fulfilled') alerts.value = a.value
   } catch (e) {
     /* 拦截器已处理 */
@@ -280,56 +262,6 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-.env-card {
-  padding: 16px 20px;
-}
-
-.env-name {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-weight: 600;
-  margin-bottom: 12px;
-}
-
-.env-loc {
-  color: var(--text-sub);
-  font-size: 12px;
-  font-weight: 400;
-}
-
-.env-values {
-  display: flex;
-  align-items: center;
-}
-
-.env-item {
-  flex: 1;
-  text-align: center;
-}
-
-.env-num {
-  font-size: 28px;
-}
-
-.env-unit {
-  font-size: 13px;
-  color: var(--text-sub);
-  margin-left: 2px;
-}
-
-.env-label {
-  color: var(--text-sub);
-  font-size: 12px;
-  margin-top: 4px;
-}
-
-.env-divider {
-  width: 1px;
-  height: 40px;
-  background: var(--border-tech);
-}
-
 .tech-card--link {
   cursor: pointer;
   transition: transform 0.2s, box-shadow 0.2s;

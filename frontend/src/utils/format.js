@@ -74,6 +74,19 @@ export function alertStatusTag(status) {
   return map[status] || 'info'
 }
 
+// 告警数值: 按指标补单位, 百分比/温度/湿度/离线
+export function formatValue(metric, value) {
+  if (value === null || value === undefined) return '-'
+  if (metric === 'offline') return '离线'
+  if (metric === 'port_down') return `${Math.round(Number(value))} 个`
+  if (metric === 'temperature') return `${Number(value).toFixed(1)}°C`
+  if (typeof metric === 'string' && metric.endsWith('percent')) {
+    return `${Number(value).toFixed(1)}%`
+  }
+  if (metric === 'humidity') return `${Number(value).toFixed(1)}%`
+  return String(value)
+}
+
 export function percentColor(v) {
   if (v >= 90) return '#ff4d5e'
   if (v >= 70) return '#ffb020'
