@@ -173,14 +173,18 @@ VENDOR_OIDS = {
         ],
     },
     "h3c": {
-        # hh3cEntityExtCpuUsage / hh3cEntityExtMemUsage (entity-based)
+        # hh3cEntityExt* 表按实体索引。**关键**: 不能只用 GETNEXT 取第一个实例 ——
+        # 华三实体表里第一个实例常常是恒为 1 的实体, 面板就会永远显示 1%。
+        # 采集侧已改为 walk 整表 + 只接受合理的百分比(见 _pick_percent)。
         "cpu_list": [
-            "1.3.6.1.4.1.25506.2.6.1.1.1.1.6",   # hh3cEntityExtCpuUsage (推荐)
-            "1.3.6.1.4.1.25506.2.6.1.1.1.1.3",   # 旧版Comware5 CPU
+            "1.3.6.1.4.1.25506.2.6.1.1.1.1.6",   # hh3cEntityExtCpuUsage (Comware7 推荐)
+            "1.3.6.1.4.1.25506.2.6.1.1.1.1.4",   # 部分版本 CPU
+            "1.3.6.1.4.1.25506.2.6.1.1.1.1.3",   # 旧版 Comware5 CPU
         ],
         "mem_list": [
-            "1.3.6.1.4.1.25506.2.6.1.1.1.1.7",   # hh3cEntityExtMemUsage (正确OID, 原来误用.8)
-            "1.3.6.1.4.1.25506.2.6.1.1.1.1.2",   # 旧版Comware5 内存
+            "1.3.6.1.4.1.25506.2.6.1.1.1.1.8",   # hh3cEntityExtMemUsage (Comware7 官方, 应为使用率)
+            "1.3.6.1.4.1.25506.2.6.1.1.1.1.2",   # 旧版 Comware5 内存
+            "1.3.6.1.4.1.25506.2.6.1.1.1.1.7",   # 备用(部分型号此列含义不同)
         ],
     },
     "cisco": {
@@ -369,6 +373,74 @@ async def snmp_walk(ip: str, community: str, oid: str, version: str = "2c") -> d
     return {}
 
 
+# --------------------------------------------------------------------------
+# CPU/内存百分比: walk 整表 + 只接受合理百分比 (修复"永远显示 1%")
+# --------------------------------------------------------------------------
+HR_PROCESSOR_LOAD = "1.3.6.1.2.1.25.3.3.1.2"      # hrProcessorLoad (0~100)
+HR_STORAGE_TYPE = "1.3.6.1.2.1.25.2.3.1.2"        # hrStorageType
+HR_STORAGE_SIZE = "1.3.6.1.2.1.25.2.3.1.5"        # hrStorageSize
+HR_STORAGE_USED = "1.3.6.1.2.1.25.2.3.1.6"        # hrStorageUsed
+HR_STORAGE_RAM = "1.3.6.1.2.1.25.2.1.2"           # hrStorageRam 枚举值
+
+
+async def _pick_percent(ip: str, community: str, oid_list: list,
+                        version: str, label: str) -> Optional[float]:
+    """遍历候选 OID 的整张表, 返回首个存在合理百分比 (0,100] 的表内最大值。
+
+    根因: 华三 hh3cEntityExt* 表按实体索引, 旧的实现用 GETNEXT 只取第一个
+    实例, 而实体表首个实例往往是某个恒为 1 的实体 -> 面板永远 1%。
+    改成 walk 全表 + 过滤合理百分比, 才拿得到主控真实占用。
+    """
+    for oid in oid_list:
+        table = await snmp_walk(ip, community, oid, version)
+        vals = []
+        for v in table.values():
+            try:
+                f = float(v)
+            except (TypeError, ValueError):
+                continue
+            if 0 < f <= 100:
+                vals.append(f)
+        if vals:
+            val = max(vals)
+            logger.info(f"[SNMP] {ip} {label} <- {oid} (实例{len(table)}个, 取max={val})")
+            return val
+        if table:
+            logger.debug(f"[SNMP] {ip} {label} {oid} 有{len(table)}个实例但无合理百分比, 试下个")
+    return None
+
+
+async def _hr_processor_load(ip: str, community: str, version: str = "2c") -> Optional[float]:
+    """标准 HOST-RESOURCES CPU 兜底: hrProcessorLoad 取最大值(最忙的核)。"""
+    table = await snmp_walk(ip, community, HR_PROCESSOR_LOAD, version)
+    vals = []
+    for v in table.values():
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= f <= 100:
+            vals.append(f)
+    return max(vals) if vals else None
+
+
+async def _hr_storage_ram_percent(ip: str, community: str, version: str = "2c") -> Optional[float]:
+    """标准 HOST-RESOURCES 内存兜底: hrStorageRam 分区的 已用/总量 百分比。"""
+    types = await snmp_walk(ip, community, HR_STORAGE_TYPE, version)
+    sizes = await snmp_walk(ip, community, HR_STORAGE_SIZE, version)
+    useds = await snmp_walk(ip, community, HR_STORAGE_USED, version)
+    for idx, t in types.items():
+        if str(t).strip() == HR_STORAGE_RAM:
+            try:
+                size = float(sizes.get(idx, 0))
+                used = float(useds.get(idx, 0))
+            except (TypeError, ValueError):
+                continue
+            if size > 0:
+                return round(used / size * 100, 1)
+    return None
+
+
 async def walk_ports(ip: str, community: str, version: str = "2c") -> list:
     """采集全部端口明细: 名称/状态/速率/备注(ifAlias)/是否物理口。"""
     descrs = await snmp_walk(ip, community, OID_IF_DESCR, version)
@@ -471,30 +543,34 @@ async def _collect_network_device_inner(
         elif "cisco" in descr_lower:
             vendor_key = "cisco"
 
+    cpu_oid_list, mem_oid_list = [], []
     if vendor_key in VENDOR_OIDS:
         cpu_oid_list = VENDOR_OIDS[vendor_key].get("cpu_list", [VENDOR_OIDS[vendor_key]["cpu"]])
         mem_oid_list = VENDOR_OIDS[vendor_key].get("mem_list", [VENDOR_OIDS[vendor_key]["mem"]])
-
-        cpu = await _get_first_value(ip, community, cpu_oid_list, version)
-        mem = await _get_first_value(ip, community, mem_oid_list, version)
-
-        if cpu:
-            try:
-                result["cpu_percent"] = float(cpu)
-            except ValueError:
-                logger.warning(f"[SNMP] {ip} CPU值无法转为float: {cpu}")
-        else:
-            logger.info(f"[SNMP] {ip} ({vendor_key}) CPU采集失败, 尝试了{len(cpu_oid_list)}个OID")
-
-        if mem:
-            try:
-                result["mem_percent"] = float(mem)
-            except ValueError:
-                logger.warning(f"[SNMP] {ip} 内存值无法转为float: {mem}")
-        else:
-            logger.info(f"[SNMP] {ip} ({vendor_key}) 内存采集失败, 尝试了{len(mem_oid_list)}个OID")
     else:
-        logger.info(f"[SNMP] {ip} 未识别厂商(vendor={vendor}, descr={descr[:60] if descr else ''}), 跳过CPU/内存采集")
+        logger.info(f"[SNMP] {ip} 未识别厂商(vendor={vendor}, descr={(descr or '')[:60]}), 仅用标准OID兜底")
+
+    # CPU: 厂商私有OID(整表walk+只取合理百分比) -> 标准 hrProcessorLoad 兜底
+    cpu_val = await _pick_percent(ip, community, cpu_oid_list, version, "CPU") if cpu_oid_list else None
+    if cpu_val is None:
+        cpu_val = await _hr_processor_load(ip, community, version)
+        if cpu_val is not None:
+            logger.info(f"[SNMP] {ip} CPU 使用标准 hrProcessorLoad 兜底 = {cpu_val}")
+    if cpu_val is not None:
+        result["cpu_percent"] = float(cpu_val)
+    else:
+        logger.info(f"[SNMP] {ip} ({vendor_key or '未知'}) CPU 采集失败")
+
+    # 内存: 厂商私有OID -> 标准 hrStorageRam 兜底
+    mem_val = await _pick_percent(ip, community, mem_oid_list, version, "内存") if mem_oid_list else None
+    if mem_val is None:
+        mem_val = await _hr_storage_ram_percent(ip, community, version)
+        if mem_val is not None:
+            logger.info(f"[SNMP] {ip} 内存 使用标准 hrStorageRam 兜底 = {mem_val}")
+    if mem_val is not None:
+        result["mem_percent"] = float(mem_val)
+    else:
+        logger.info(f"[SNMP] {ip} ({vendor_key or '未知'}) 内存 采集失败")
 
     # 端口明细 (名称/状态/速率/备注); UP/总 只统计物理口, 排除VLAN等虚拟口
     ports = await walk_ports(ip, community, version)

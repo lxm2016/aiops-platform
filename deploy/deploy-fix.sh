@@ -139,6 +139,11 @@ if [ -f "$SCRIPT_DIR/tools/discover_env.py" ]; then
     echo "    用法: python3 $DST/tools/discover_env.py --host <串口服务器IP> \\"
     echo "              --ports 5001-5008 --slaves 1-16 --rtu [--enroll]"
 fi
+if [ -f "$SCRIPT_DIR/tools/probe_snmp.py" ]; then
+    cp -f "$SCRIPT_DIR/tools/probe_snmp.py" "$DST/tools/"
+    echo "  交换机 SNMP CPU/内存 OID 诊断 -> $DST/tools/probe_snmp.py"
+    echo "    用法: $DST/backend/venv/bin/python $DST/tools/probe_snmp.py --ip <交换机IP>"
+fi
 
 # ---------------------------------------------------------------------------
 echo ""

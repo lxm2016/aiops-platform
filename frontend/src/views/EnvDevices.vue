@@ -204,7 +204,7 @@
             </el-form-item>
           </el-col>
           <el-col :span="7">
-            <el-form-item label="从站地址">
+            <el-form-item label="从站地址（Modbus地址）">
               <el-input-number v-model="devForm.slave_id" :min="1" :max="247" style="width:100%" />
             </el-form-item>
           </el-col>
