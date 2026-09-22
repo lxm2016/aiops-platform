@@ -158,9 +158,21 @@ def _migrate_sqlite():
             cur.execute(f"PRAGMA table_info({table})")
             existing = {row[1] for row in cur.fetchall()}
             for col, ddl in columns:
-                if col not in existing:
+                # col 可能带双引号(如 "group", SQLite 保留字), 必须去引号后再与
+                # PRAGMA 返回的列名比较, 否则 '"group"' 永远匹配不到现有列 'group',
+                # 会让重复 ALTER 报 "duplicate column name" 并导致后端启动失败。
+                col_unquoted = col.strip('"')
+                if col_unquoted in existing:
+                    continue
+                try:
                     cur.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
-                    logger.info(f"[DB] 迁移: {table} 新增列 {col}")
+                    logger.info(f"[DB] 迁移: {table} 新增列 {col_unquoted}")
+                except sqlite3.OperationalError as e:
+                    # 并发/重复部署等极端情况下, 列可能已被其它进程加上
+                    if "duplicate column" in str(e).lower():
+                        logger.warning(f"[DB] 迁移: {table}.{col_unquoted} 已存在, 跳过")
+                    else:
+                        raise
 
         # ---- 索引优化 (幂等) ----
         # 历史曲线查询: WHERE server_id=? AND collected_at BETWEEN ... ORDER BY collected_at
