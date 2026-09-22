@@ -170,6 +170,50 @@ class ModbusTCP:
         return body
 
     # ------------------------------------------------------------------
+    # 缓冲排空 —— 透传口被"第二个主机"轮询时会留下陈旧应答帧
+    # ------------------------------------------------------------------
+    def drain(self, settle=0.4):
+        """把连上瞬间就已堆积在串口服务器里的字节全部吸干并丢弃。
+
+        现场教训(192.168.204.71:5002): 一个 recv 里同时捞回 10 个完整帧
+        (从站 9~18 依次排列), 而本方只问了从站 12 —— 这些是**别人**轮询留下的
+        陈旧应答。不清掉的话, 下一次请求的解析会整体错位(问 12 却拿到 16 的帧)。
+        返回值保留下来用于展示: 非空即证明"这个口还有别的主机在说话"。
+        """
+        if self.sock is None:
+            self.connect()
+        self.sock.settimeout(settle)
+        buf = b""
+        try:
+            while len(buf) < 8192:
+                chunk = self.sock.recv(512)
+                if not chunk:
+                    break
+                buf += chunk
+        except (socket.timeout, TimeoutError):
+            pass
+        return buf
+
+    def listen(self, seconds=5.0):
+        """连上后**一个字节都不发**, 纯监听。
+
+        用来回答: "这个串口口是不是还有别的主机在轮询?" —— 若什么都不发
+        也能收到帧, 那就是有第二主机(通常是还没下线的原监控平台)。
+        """
+        if self.sock is None:
+            self.connect()
+        self.sock.settimeout(1.0)
+        buf, t0 = b"", time.time()
+        while time.time() - t0 < seconds:
+            try:
+                chunk = self.sock.recv(512)
+                if chunk:
+                    buf += chunk
+            except (socket.timeout, TimeoutError):
+                pass
+        return buf
+
+    # ------------------------------------------------------------------
     # 原始帧诊断 —— 排查"幽灵从站/数值可疑"的杀手锏
     # ------------------------------------------------------------------
     def raw_exchange(self, fc, addr, count, slave=None, settle=1.0):
@@ -220,6 +264,43 @@ class ModbusTCP:
 
 def u16_to_s16(v):
     return v - 0x10000 if v >= 0x8000 else v
+
+
+def split_rtu_frames(buf):
+    """从一段字节流里切出所有 CRC 合法、结构自洽的 RTU 帧。
+
+    串口服务器把多帧堆在一起时(现场一次 recv 收到 70B = 10 帧), 靠它拆开看
+    到底是"一台设备在代答"还是"一堆陈旧应答堆在缓冲区里"。
+    返回 [(偏移, 从站, 功能码, 数据值列表)]。
+    """
+    out, i, n = [], 0, len(buf)
+    while i < n - 4:
+        slave, fc = buf[i], buf[i + 1]
+        third = buf[i + 2]
+        if fc == 0 or fc > 0x7F:
+            i += 1
+            continue
+        if fc & 0x80:                      # 异常帧: 固定 5 字节
+            size = 5
+        elif fc in (1, 2, 3, 4):
+            size = 3 + third + 2
+        else:
+            i += 1
+            continue
+        if size < 5 or i + size > n:
+            i += 1
+            continue
+        frame = buf[i:i + size]
+        if struct.unpack("<H", frame[-2:])[0] != _crc16(frame[:-2]):
+            i += 1
+            continue
+        vals = []
+        if fc in (3, 4) and not (fc & 0x80):
+            data = frame[3:3 + third]
+            vals = list(struct.unpack(f">{len(data) // 2}H", data[:len(data) // 2 * 2]))
+        out.append((i, slave, fc, vals))
+        i += size
+    return out
 
 
 def explain_frame(req, resp, rtu, fc, count):

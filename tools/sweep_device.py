@@ -32,6 +32,9 @@
 
     # 数值到底是"活的"还是"死的"? 连读 10 次看哪些地址会变
     python3 sweep_device.py --host 192.168.204.71 --port 5002 --slave 12 --rtu --watch 10
+
+    # 怀疑还有别的主机(原监控平台)在抢这条 485? 什么都不发, 纯听 15 秒
+    python3 sweep_device.py --host 192.168.204.71 --port 5002 --rtu --listen 15
 """
 import argparse
 import json
@@ -40,7 +43,9 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from probe_modbus import ModbusTCP, explain_frame  # noqa: E402
+from probe_modbus import (  # noqa: E402
+    ModbusTCP, explain_frame, split_rtu_frames,
+)
 
 FC_COIL, FC_DISCRETE, FC_HOLDING, FC_INPUT = 1, 2, 3, 4
 
@@ -72,6 +77,10 @@ def scan_fc(host, port, slave, fc, start, count, timeout, rtu, chunk=32):
         n = min(chunk, start + count - addr)
         try:
             with ModbusTCP(host, port, slave, timeout=timeout, rtu=rtu) as m:
+                # 每段的首块先排空缓冲: 透传口若被别的主机轮询过, 会残留陈旧应答帧,
+                # 不吸干就会"问 12 拿到 16 的帧"。只排首块, 兼顾速度与正确性。
+                if addr == start:
+                    m.drain()
                 val = m.read(fc, addr, n)
             connected = True
         except Exception as e:  # noqa: BLE001
@@ -101,6 +110,7 @@ def probe_resp_slave(host, port, slave, timeout, rtu):
     """
     try:
         with ModbusTCP(host, port, slave, timeout=timeout, rtu=rtu) as m:
+            m.drain()          # 必须排空, 否则读到的是别人留下的陈旧帧(首字节不是自己的)
             req, resp = m.raw_exchange(FC_HOLDING, 0, 8, settle=1.0)
         if not resp:
             return None, slave
@@ -178,6 +188,38 @@ def sweep_one(host, port, slave, start, count, timeout, rtu):
     return summary, resp_slave
 
 
+def listen_only(host, port, seconds, rtu):
+    """连上后什么都不发, 纯监听 —— 判断有没有第二个主机在轮询这个口。"""
+    print(f"\n纯监听   目标 {host}:{port}   {seconds}s   "
+          f"{'RTU透传' if rtu else 'Modbus TCP'}   (一个字节都不发)")
+    print("=" * 74)
+    try:
+        with ModbusTCP(host, port, 1, timeout=3.0, rtu=rtu) as m:
+            buf = m.listen(seconds)
+    except Exception as e:  # noqa: BLE001
+        print(f"  ✗ 连不上: {type(e).__name__}: {e}")
+        return
+    if not buf:
+        print(f"  ✓ {seconds}s 内一个字节都没有 —— 这个口目前只有你在说话。")
+        print("    若后面扫描仍串帧, 那就是串口服务器自身的多主机缓存/边缘采集功能。")
+        return
+    print(f"  ⚠ 什么都没发, 却收到 {len(buf)}B —— **有别的主机在轮询这个口**")
+    print(f"    原始: {buf[:120].hex(' ').upper()}{' ...' if len(buf) > 120 else ''}")
+    frames = split_rtu_frames(buf) if rtu else []
+    if frames:
+        print(f"\n    拆出 {len(frames)} 个合法帧:")
+        for off, slave, fc, vals in frames[:20]:
+            nz = [(i, v) for i, v in enumerate(vals) if v]
+            print(f"      +{off:<4} 从站={slave:<4} FC=0x{fc:02X} "
+                  f"{('非零 ' + str(nz)) if nz else '(全 0)'}")
+        slaves = sorted({f[1] for f in frames})
+        print(f"\n    被轮询的从站地址: {slaves}")
+        print("    → 去串口服务器 WEB 的『连接状态/当前连接』页看对端 IP, "
+              "多半是还没下线的原监控平台。")
+    print("\n  处置: 让另一个主机停掉(或改端口), 再重扫一次。")
+    print("    两个主机同时问一条 RS-485, 应答会互相串, 数据不可信。")
+
+
 def diag_raw(host, port, slave, timeout, rtu):
     """原始帧诊断 —— 多个从站返回同一可疑值时, 用它定性。"""
     print(f"\n原始帧诊断   目标 {host}:{port}   从站 {slave}   "
@@ -196,7 +238,15 @@ def diag_raw(host, port, slave, timeout, rtu):
         print(f"\n  ── {label} " + "─" * (60 - len(label)))
         try:
             with ModbusTCP(host, port, slave, timeout=timeout, rtu=rtu) as m:
+                stale = m.drain()          # 先吸干别人留下的陈旧帧
                 req, resp = m.raw_exchange(fc, addr, cnt, settle=1.2)
+            if stale:
+                print(f"    ⚠ 开连即发现 {len(stale)}B 残留帧(已丢弃): "
+                      f"{stale[:40].hex(' ').upper()}{' ...' if len(stale) > 40 else ''}")
+                fr = split_rtu_frames(stale) if rtu else []
+                if fr:
+                    print(f"      残留帧来自从站 {sorted({f[1] for f in fr})} "
+                          f"—— 有别的主机在轮询")
             for line in explain_frame(req, resp, rtu, fc, cnt):
                 print(line)
         except Exception as e:  # noqa: BLE001
@@ -225,6 +275,7 @@ def watch(host, port, slave, count, timeout, rtu, times, interval):
         for fc in (FC_HOLDING, FC_INPUT):
             try:
                 with ModbusTCP(host, port, slave, timeout=timeout, rtu=rtu) as m:
+                    m.drain()              # 排空陈旧帧, 否则读到的是上一轮的应答
                     vals = m.read(fc, 0, count)
                 series.setdefault(fc, {})
                 for a, v in enumerate(vals):
@@ -277,11 +328,16 @@ def main():
     ap.add_argument("--watch", type=int, default=0, metavar="N",
                     help="连读 N 次, 挑出会变的地址(区分活数据与死数据)")
     ap.add_argument("--interval", type=float, default=3.0, help="--watch 的间隔秒数")
+    ap.add_argument("--listen", type=float, default=0, metavar="S",
+                    help="纯监听 S 秒(一个字节都不发), 判断有没有第二个主机在轮询")
     args = ap.parse_args()
 
     rtu = not args.tcp
     slaves = parse_range(args.slaves) if args.slaves else [args.slave]
 
+    if args.listen:
+        listen_only(args.host, args.port, args.listen, rtu)
+        return
     if args.raw:
         diag_raw(args.host, args.port, slaves[0], args.timeout, rtu)
         return
@@ -314,28 +370,34 @@ def main():
             sig = json.dumps({str(k): sorted(v) for k, v in summ.items()}, sort_keys=True)
             sigs.setdefault(sig, []).append(s)
         dup = [v for v in sigs.values() if len(v) > 1]
-        if dup:
-            for group in dup:
-                print(f"  ⚠ 从站 {group} 返回的数据完全相同 —— 疑似同一台物理设备")
-                print("     在应答所有从站地址(或网关把请求都透传给了同一台)。")
-                print("     这些从站多半不是独立设备, 不要挨个建设备。")
-        else:
-            print("  各从站数据不同, 未发现幽灵响应。")
 
-        # 更强的证据: 不同请求地址拿到同一个"应答从站字节"
+        # 先看"应答从站字节" —— 它比数据相同不强
+        by_resp = {}
+        for q, r in resp_slaves.items():
+            by_resp.setdefault(r, []).append(q)
         if resp_slaves:
-            by_resp = {}
-            for q, r in resp_slaves.items():
-                by_resp.setdefault(r, []).append(q)
             print()
             for r, qs in sorted(by_resp.items()):
                 flag = "  ⚠" if len(qs) > 1 else "   "
                 print(f"{flag} 请求从站 {qs} → 应答从站字节均为 {r}")
-            multi = [v for v in by_resp.values() if len(v) > 1]
-            if multi:
-                print("\n  ⚠ 结论: 这些请求地址拿到的是**同一个应答从站字节**, 说明总线上")
-                print("     只有一台设备在代答。它们不是多台设备, 千万别挨个建。")
-                print("     下一步: 用 --raw 看原始帧, 并到串口服务器上核对这段 485 的接线。")
+
+        ghost = [v for v in by_resp.values() if len(v) > 1]
+        if ghost:
+            print("\n  ⚠ 结论: 不同请求地址拿到**同一个应答从站字节**, 说明总线上")
+            print("     只有一台设备在代答。它们不是多台设备, 千万别挨个建。")
+            print("     下一步: 用 --raw 看原始帧, 并核对这段 485 的接线。")
+        elif dup:
+            # 数据相同, 但每台都能正确回显自己的地址 —— 那是 N 台同型号设备
+            # 读数恰好一致(同一个机房里的温湿度/烟感本来就该一样), 不是幽灵。
+            print()
+            for group in dup:
+                print(f"  ✓ 从站 {group} 数据相同, 但**应答从站字节各自正确**")
+            print("     → 这是 " + str(len(dup[0])) + " 台同型号设备读数恰好一致"
+                  "(同一机房内的温湿度/烟感本就该相同), 不是幽灵。可以分别建设备。")
+            print("     → 但要确认它们是否真是不同位置的设备, 别把同一点位建两遍。")
+        else:
+            if not resp_slaves:
+                print("  各从站数据不同, 未发现幽灵响应。")
 
 
 if __name__ == "__main__":
