@@ -169,6 +169,39 @@ class ModbusTCP:
             raise ModbusError(body[1] if len(body) > 1 else 0)
         return body
 
+    # ------------------------------------------------------------------
+    # 原始帧诊断 —— 排查"幽灵从站/数值可疑"的杀手锏
+    # ------------------------------------------------------------------
+    def raw_exchange(self, fc, addr, count, slave=None, settle=1.0):
+        """发一帧, 把线上回来的**所有字节**原样捞回来(不再按协议裁剪)。
+
+        为什么需要: 只看解析后的数值会被解析逻辑"圆过去"。现场遇到过
+        多个从站返回同一个可疑值(如 259=0x0103, 正好是请求帧 01 03 的字节),
+        必须看原始字节才能判断应答究竟来自设备, 还是来自网关回显/残留缓冲。
+        """
+        if self.sock is None:
+            self.connect()
+        unit = self.slave if slave is None else slave
+        if self.rtu:
+            pdu = bytes([unit & 0xFF, fc]) + struct.pack(">HH", addr, count)
+            req = pdu + struct.pack("<H", _crc16(pdu))
+        else:
+            self._tid = (self._tid + 1) & 0xFFFF
+            pdu = struct.pack(">BHH", fc, addr, count)
+            req = struct.pack(">HHHB", self._tid, 0, len(pdu) + 1, unit) + pdu
+        self.sock.sendall(req)
+        self.sock.settimeout(settle)
+        buf = b""
+        try:
+            while len(buf) < 512:
+                chunk = self.sock.recv(256)
+                if not chunk:
+                    break
+                buf += chunk
+        except (socket.timeout, TimeoutError):
+            pass
+        return req, buf
+
     def read(self, fc, addr, count, slave=None):
         """返回寄存器值列表。"""
         body = self._request(fc, addr, count, slave)
@@ -187,6 +220,76 @@ class ModbusTCP:
 
 def u16_to_s16(v):
     return v - 0x10000 if v >= 0x8000 else v
+
+
+def explain_frame(req, resp, rtu, fc, count):
+    """把一帧原始字节翻译成人话, 并把"不自洽"的地方点出来。返回行列表。
+
+    重点看三件事:
+      ① 应答里的从站字节 == 请求里的从站字节吗? 不等 → 回话的不是你问的那台。
+      ② 字节数/帧长/CRC 自洽吗? 不 CRC → 线路干扰或波特率不对。
+      ③ 有没有尾随字节? 有 → 上一帧残留, 会让后续解析整体错位。
+    """
+    L = []
+    L.append(f"    请求({len(req):>3}B): {req.hex(' ').upper()}")
+    if not resp:
+        L.append("    应答: <空> —— 设备一个字节都没回")
+        return L
+    L.append(f"    应答({len(resp):>3}B): {resp.hex(' ').upper()}")
+
+    if not rtu:  # ---- 标准 Modbus TCP ----
+        if len(resp) < 8:
+            L.append(f"    ✗ 应答不足 8 字节({len(resp)}), 不是合法 MBAP 帧")
+            return L
+        _tid, _pid, length, unit = struct.unpack(">HHHB", resp[:7])
+        L.append(f"    MBAP: 事务号={_tid} 长度={length} 单元号={unit} (请求单元号={req[6]})")
+        L.append(f"    {'✓ 单元号一致' if unit == req[6] else '✗ 单元号不一致 ← 回话的不是你问的那台!'}")
+        body = resp[7:]
+        if not body:
+            L.append("    ✗ 无 PDU")
+            return L
+        rfc = body[0]
+        if rfc & 0x80:
+            L.append(f"    功能码=0x{rfc:02X} → 异常帧, 异常码={body[1] if len(body) > 1 else '?'}")
+            return L
+        L.append(f"    功能码=0x{rfc:02X} {'✓' if rfc == fc else '✗ 与请求的 0x%02X 不符' % fc}")
+        return L
+
+    # ---- RTU 透传 ----
+    if len(resp) < 3:
+        L.append(f"    ✗ 应答不足 3 字节({len(resp)}), 不是合法 RTU 帧")
+        return L
+    rs, rfc, third = resp[0], resp[1], resp[2]
+    same = "✓ 一致" if rs == req[0] else "✗ 不一致 ← 关键!"
+    L.append(f"    从站: 应答={rs}  请求={req[0]}   {same}")
+    if rs != req[0]:
+        L.append("      → 回话的不是你问的那台。常见原因: 总线上有设备应答所有地址, "
+                 "或网关把请求透传给了另一台。")
+    if rfc & 0x80:
+        L.append(f"    功能码=0x{rfc:02X} → 异常帧, 异常码={third}: {EXC.get(third, '未知')}")
+        return L
+    ok = "✓" if rfc == fc else "✗"
+    L.append(f"    功能码: 0x{rfc:02X} (请求 0x{fc:02X}) {ok}"
+             + ("" if rfc == fc else "  ← 设备连功能码都不区分, 高度疑似罐装应答/回显"))
+    expect = (count + 7) // 8 if fc in (1, 2) else count * 2
+    L.append(f"    字节数: {third} (期望 {expect}) {'✓' if third == expect else '✗ 不符'}")
+    need = 3 + third + 2
+    L.append(f"    帧长: 应为 {need}B, 实收 {len(resp)}B {'✓' if len(resp) == need else '✗ 不符'}")
+    if len(resp) > need:
+        L.append(f"    ⚠ 多出 {len(resp) - need}B 尾随字节: "
+                 f"{resp[need:].hex(' ').upper()} —— 上一帧残留/回显, 会让后续解析整体错位!")
+    if len(resp) >= need:
+        crc_got = struct.unpack("<H", resp[need - 2:need])[0]
+        crc_calc = _crc16(resp[:need - 2])
+        L.append(f"    CRC: 收到=0x{crc_got:04X} 计算=0x{crc_calc:04X} "
+                 f"{'✓' if crc_got == crc_calc else '✗ 校验失败 —— 线路干扰或波特率/校验位不对'}")
+        data = resp[3:3 + third]
+        if fc in (3, 4) and third >= 2:
+            vals = struct.unpack(f">{third // 2}H", data[:third // 2 * 2])
+            nz = [(i, v) for i, v in enumerate(vals) if v]
+            L.append(f"    寄存器: {list(vals)}")
+            L.append(f"    非零  : {nz if nz else '无'}")
+    return L
 
 
 def guess_meaning(addr, fc, raw):

@@ -26,14 +26,21 @@
     python3 sweep_device.py --host 192.168.204.71 --port 5004 --slave 1 --rtu --count 128
 
     # 标准 Modbus TCP(非透传)去掉 --rtu
+
+    # 多个从站返回同一个可疑值? 抓原始帧定性(看应答从站字节/CRC/尾随字节)
+    python3 sweep_device.py --host 192.168.204.71 --port 5002 --slave 12 --rtu --raw
+
+    # 数值到底是"活的"还是"死的"? 连读 10 次看哪些地址会变
+    python3 sweep_device.py --host 192.168.204.71 --port 5002 --slave 12 --rtu --watch 10
 """
 import argparse
 import json
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from probe_modbus import ModbusTCP  # noqa: E402
+from probe_modbus import ModbusTCP, explain_frame  # noqa: E402
 
 FC_COIL, FC_DISCRETE, FC_HOLDING, FC_INPUT = 1, 2, 3, 4
 
@@ -87,11 +94,27 @@ def describe(fc):
             FC_HOLDING: "FC03 保持寄存器", FC_INPUT: "FC04 输入寄存器"}[fc]
 
 
+def probe_resp_slave(host, port, slave, timeout, rtu):
+    """抓一帧, 取应答里的从站字节。用来判断"回话的是不是你问的那台"。
+
+    返回 (应答从站, 请求从站) ; 读不到返回 (None, slave)。
+    """
+    try:
+        with ModbusTCP(host, port, slave, timeout=timeout, rtu=rtu) as m:
+            req, resp = m.raw_exchange(FC_HOLDING, 0, 8, settle=1.0)
+        if not resp:
+            return None, slave
+        return resp[0], req[0]
+    except Exception:  # noqa: BLE001
+        return None, slave
+
+
 def sweep_one(host, port, slave, start, count, timeout, rtu):
     print(f"\n{'=' * 74}")
     print(f" 从站 {slave}  @ {host}:{port}   {'RTU over TCP(透传)' if rtu else 'Modbus TCP'}")
     print("=" * 74)
     summary = {}
+    resp_slave = None
     for fc in (FC_HOLDING, FC_INPUT, FC_COIL, FC_DISCRETE):
         ok, items, err = scan_fc(host, port, slave, fc, start, count, timeout, rtu)
         name = describe(fc)
@@ -140,7 +163,101 @@ def sweep_one(host, port, slave, start, count, timeout, rtu):
         hint.append("未识别出常见模式。把上面的非零点位贴回来, 我据此配映射。")
     for h in hint:
         print(f"    · {h}")
-    return summary
+
+    # ---- 应答从站字节校验: 回话的是不是这台? ----
+    if summary and rtu:
+        rs, qs = probe_resp_slave(host, port, slave, timeout, rtu)
+        resp_slave = rs
+        if rs is None:
+            print(f"  ⚠ 复核读不到应答(总线不稳定)")
+        elif rs != qs:
+            print(f"  ⚠ 应答从站字节={rs}, 但请求的是 {qs} "
+                  f"—— 回话的不是这台, 是总线上的另一台在代答!")
+        else:
+            print(f"  ✓ 应答从站字节={rs}, 与请求一致")
+    return summary, resp_slave
+
+
+def diag_raw(host, port, slave, timeout, rtu):
+    """原始帧诊断 —— 多个从站返回同一可疑值时, 用它定性。"""
+    print(f"\n原始帧诊断   目标 {host}:{port}   从站 {slave}   "
+          f"{'RTU透传' if rtu else 'Modbus TCP'}")
+    print("=" * 74)
+    print("  看三件事: ①应答从站==请求从站? ②CRC/帧长自洽? ③有没有尾随字节?")
+    cases = [
+        (FC_HOLDING, 0, 8, "FC03 保持寄存器 0~7"),
+        (FC_HOLDING, 0, 32, "FC03 保持寄存器 0~31"),
+        (FC_HOLDING, 7, 1, "FC03 只读 addr7"),
+        (FC_INPUT, 0, 32, "FC04 输入寄存器 0~31"),
+        (FC_DISCRETE, 0, 16, "FC02 离散输入 0~15"),
+        (FC_COIL, 0, 16, "FC01 线圈 0~15"),
+    ]
+    for fc, addr, cnt, label in cases:
+        print(f"\n  ── {label} " + "─" * (60 - len(label)))
+        try:
+            with ModbusTCP(host, port, slave, timeout=timeout, rtu=rtu) as m:
+                req, resp = m.raw_exchange(fc, addr, cnt, settle=1.2)
+            for line in explain_frame(req, resp, rtu, fc, cnt):
+                print(line)
+        except Exception as e:  # noqa: BLE001
+            print(f"    ✗ {type(e).__name__}: {e}")
+
+    print("\n" + "=" * 74)
+    print("  怎么判")
+    print("=" * 74)
+    print("    · 应答从站 != 请求从站  → 回话的不是这台, 总线上有设备应答所有地址")
+    print("    · CRC 校验失败          → 波特率/数据位/校验位不对, 或线路干扰/没加终端电阻")
+    print("    · 有尾随字节            → 串口服务器缓冲残留, 解析会整体错位")
+    print("    · FC03 与 FC04 数据完全相同  → 设备连功能码都不区分, 疑似罐装应答")
+    print("    · 应答全空              → 这条 485 总线上没有 Modbus 从站")
+    print("\n  最硬的一招(建议必做): 把该端口的 485 接线拔掉, 再扫一次。")
+    print("    数据还在 → 不是来自现场设备, 是网关回显/缓存;")
+    print("    数据消失 → 确实是现场设备, 再按上面的自洽性逐条查。")
+
+
+def watch(host, port, slave, count, timeout, rtu, times, interval):
+    """反复读同一段寄存器, 挑出"会变"的地址 —— 区分活数据与死数据。"""
+    print(f"\n连读观测   目标 {host}:{port}   从站 {slave}   地址 0~{count - 1}   "
+          f"{'RTU透传' if rtu else 'Modbus TCP'}   {times} 次 × {interval}s")
+    print("=" * 74)
+    series = {}
+    for i in range(times):
+        for fc in (FC_HOLDING, FC_INPUT):
+            try:
+                with ModbusTCP(host, port, slave, timeout=timeout, rtu=rtu) as m:
+                    vals = m.read(fc, 0, count)
+                series.setdefault(fc, {})
+                for a, v in enumerate(vals):
+                    series[fc].setdefault(a, []).append(v)
+            except Exception as e:  # noqa: BLE001
+                if i == 0:
+                    print(f"  [{'FC03' if fc == 3 else 'FC04'}] 读不到: {type(e).__name__}: {e}")
+        if i < times - 1:
+            time.sleep(interval)
+        print(f"  第 {i + 1}/{times} 次 done", end="\r", flush=True)
+    print(" " * 30, end="\r")
+
+    print("\n结果")
+    print("=" * 74)
+    for fc in (FC_HOLDING, FC_INPUT):
+        if fc not in series:
+            continue
+        changed, frozen = {}, {}
+        for a, vs in sorted(series[fc].items()):
+            if not any(vs):
+                continue
+            (changed if len(set(vs)) > 1 else frozen)[a] = vs
+        name = describe(fc)
+        if not changed and not frozen:
+            print(f"  [{name}] 全 0")
+            continue
+        print(f"  [{name}]")
+        for a, vs in changed.items():
+            print(f"     addr {a:<4} 会变  {vs}   ← 活数据")
+        for a, vs in frozen.items():
+            print(f"     addr {a:<4} 恒定  {vs[0]}" + (f"  (0x{vs[0]:04X})" if vs[0] else ""))
+    print("\n  判读: 会漂移的是真传感器读数(温湿度天然波动);")
+    print("        纹丝不动且数值可疑(如 259=0x0103)的, 高度怀疑是回显/残留帧。")
 
 
 def main():
@@ -154,15 +271,33 @@ def main():
     ap.add_argument("--start", type=int, default=0, help="起始地址, 默认 0")
     ap.add_argument("--count", type=int, default=32, help="扫描个数, 默认 32")
     ap.add_argument("--timeout", type=float, default=1.0)
+    ap.add_argument("--raw", action="store_true",
+                    help="原始帧诊断模式: 打印线上真实字节并做自洽性分析"
+                         "(排查幽灵从站/可疑数值)")
+    ap.add_argument("--watch", type=int, default=0, metavar="N",
+                    help="连读 N 次, 挑出会变的地址(区分活数据与死数据)")
+    ap.add_argument("--interval", type=float, default=3.0, help="--watch 的间隔秒数")
     args = ap.parse_args()
 
     rtu = not args.tcp
     slaves = parse_range(args.slaves) if args.slaves else [args.slave]
+
+    if args.raw:
+        diag_raw(args.host, args.port, slaves[0], args.timeout, rtu)
+        return
+    if args.watch:
+        watch(args.host, args.port, slaves[0], args.count, args.timeout, rtu,
+              args.watch, args.interval)
+        return
+
     print(f"单设备寄存器全扫   目标 {args.host}:{args.port}   从站 {slaves}   "
           f"{'RTU透传' if rtu else 'Modbus TCP'}   地址 {args.start}~{args.start + args.count - 1}")
-    results = {}
+    results, resp_slaves = {}, {}
     for s in slaves:
-        results[s] = sweep_one(args.host, args.port, s, args.start, args.count, args.timeout, rtu)
+        summ, rs = sweep_one(args.host, args.port, s, args.start, args.count, args.timeout, rtu)
+        results[s] = summ
+        if rs is not None:
+            resp_slaves[s] = rs
 
     # ---- 幽灵从站检测: 多个从站返回完全相同的数据 ----
     # 现场出现过: 5002 上从站 1 和 12 都读到 addr7=259 完全相同的值,
@@ -186,6 +321,21 @@ def main():
                 print("     这些从站多半不是独立设备, 不要挨个建设备。")
         else:
             print("  各从站数据不同, 未发现幽灵响应。")
+
+        # 更强的证据: 不同请求地址拿到同一个"应答从站字节"
+        if resp_slaves:
+            by_resp = {}
+            for q, r in resp_slaves.items():
+                by_resp.setdefault(r, []).append(q)
+            print()
+            for r, qs in sorted(by_resp.items()):
+                flag = "  ⚠" if len(qs) > 1 else "   "
+                print(f"{flag} 请求从站 {qs} → 应答从站字节均为 {r}")
+            multi = [v for v in by_resp.values() if len(v) > 1]
+            if multi:
+                print("\n  ⚠ 结论: 这些请求地址拿到的是**同一个应答从站字节**, 说明总线上")
+                print("     只有一台设备在代答。它们不是多台设备, 千万别挨个建。")
+                print("     下一步: 用 --raw 看原始帧, 并到串口服务器上核对这段 485 的接线。")
 
 
 if __name__ == "__main__":
