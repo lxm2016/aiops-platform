@@ -144,6 +144,11 @@ if [ -f "$SCRIPT_DIR/tools/probe_snmp.py" ]; then
     echo "  交换机 SNMP CPU/内存 OID 诊断 -> $DST/tools/probe_snmp.py"
     echo "    用法: $DST/backend/venv/bin/python $DST/tools/probe_snmp.py --ip <交换机IP>"
 fi
+if [ -f "$SCRIPT_DIR/tools/sweep_device.py" ]; then
+    cp -f "$SCRIPT_DIR/tools/sweep_device.py" "$DST/tools/"
+    echo "  单设备寄存器全扫 -> $DST/tools/sweep_device.py"
+    echo "    用法: python3 $DST/tools/sweep_device.py --host <IP> --port <端口> --slave <地址> --rtu"
+fi
 
 # ---------------------------------------------------------------------------
 echo ""

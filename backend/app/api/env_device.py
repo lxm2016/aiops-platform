@@ -84,6 +84,7 @@ CATEGORY_LABELS = {
     "smoke": "烟感",
     "water": "水浸",
     "ups": "UPS",
+    "aircon": "精密空调",
     "power": "配电",
     "door": "门禁",
     "other": "其他",
@@ -113,6 +114,10 @@ CATEGORY_TEMPLATES = {
         {"name": "漏水状态", "key": "water", "fc": 1, "address": 0,
          "data_type": "bit", "alarm_value": 1, "unit": ""},
     ],
+    # 精密空调: 各厂家(海瑞弗/维谛/施耐德...)寄存器差异很大, **不预置点位**,
+    # 避免像早期温湿度那样把错误映射带进现场。先跑 tools/sweep_device.py
+    # 探明真实寄存器, 再在界面按实际值加点。
+    "aircon": [],
     "ups": [
         # ---- 整机交流输入 (FC04 @ 30001~30010 -> 地址 30000~30009) ----
         {"name": "输入A相电压", "key": "ups_voltage", "fc": 4, "address": 30000,

@@ -121,17 +121,31 @@ async def main_async(args):
         if rows and rows[0][0] == "__error__":
             print(f"    出错: {rows[0][1]}")
             continue
-        for suffix, val in rows[:12]:
+        nonzero = [(s, v) for s, v in rows if str(v).strip() not in ("", "0", "0.0")]
+        for suffix, val in rows[:6]:
+            print(f"    实例 {suffix:<12} = {val}")
+        if len(rows) > 6:
+            print(f"    ... 共 {len(rows)} 个实例 (只印前6条, 见下方非零汇总)")
+        for suffix, val in nonzero[:12]:
             mark = ""
             try:
-                f = float(val)
-                if 0 < f <= 100:
+                if 0 < float(val) <= 100:
                     mark = "   <== 合理百分比(可能是使用率)"
             except ValueError:
                 pass
-            print(f"    实例 {suffix:<12} = {val}{mark}")
-        if len(rows) > 12:
-            print(f"    ... 共 {len(rows)} 个实例")
+            print(f"    ★ 非零 实例 {suffix:<12} = {val}{mark}")
+        if len(nonzero) > 12:
+            print(f"    ... 另有 {len(nonzero) - 12} 个非零实例")
+        if not nonzero:
+            print("    (全表 174/若干实例的值都为 0, 该列很可能不是使用率)")
+        nums = []
+        for _s, _v in rows:
+            try:
+                nums.append(float(_v))
+            except ValueError:
+                pass
+        if nums:
+            print(f"    本列汇总: 非零 {len(nonzero)} 个, 最大 {max(nums)}, 最小 {min(nums)}")
         if oid == "1.3.6.1.2.1.25.2.3.1.2":   # hrStorageType, 记下 RAM 分区索引
             for suffix, val in rows:
                 if str(val).strip() == HR_STORAGE_RAM:
