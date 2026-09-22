@@ -43,12 +43,48 @@ class ModbusError(Exception):
     pass
 
 
+def _drain_socket(sock, settle=0.35, cap=8192) -> bytes:
+    """把连接上已经堆积的字节全部吸干(无法预知长度, 只能读到静默为止)。
+
+    为什么要这么做 —— 现场 192.168.204.71:5002 的真实情况:
+    这条 RS-485 上**还有另一台监控服务器在同时轮询**(已由用户确认)。
+    串口服务器是透明转发, 应答没有任何路由标识, 谁的响应先回来就给谁。
+    于是我们新建一条 TCP 连接时, 里面很可能已经躺着别人那一轮留下的应答帧。
+    不吸干就读, 第一个字节就是脏的 —— 表现为"问 12 却解析出 16 的帧"。
+
+    返回被丢弃的字节, 供上层记录取证。
+    """
+    if sock is None:
+        return b""
+    old = sock.gettimeout()
+    sock.settimeout(settle)
+    buf = b""
+    try:
+        while len(buf) < cap:
+            chunk = sock.recv(512)
+            if not chunk:
+                break
+            buf += chunk
+    except (socket.timeout, TimeoutError, OSError):
+        pass
+    finally:
+        try:
+            sock.settimeout(old)
+        except OSError:
+            pass
+    return buf
+
+
 class ModbusTCPClient:
     """同步的 Modbus TCP 客户端。调用方用 asyncio.to_thread 包一层即可。"""
 
-    def __init__(self, host: str, port: int, slave: int = 1, timeout: float = 3.0):
+    def __init__(self, host: str, port: int, slave: int = 1, timeout: float = 3.0,
+                 drain_first: bool = True, retries: int = 2):
         self.host, self.port, self.slave = host, port, slave
         self.timeout = timeout
+        self.drain_first = drain_first
+        self.retries = retries
+        self.drained_bytes = 0
         self._tid = 0
         self.sock: Optional[socket.socket] = None
 
@@ -64,6 +100,8 @@ class ModbusTCPClient:
             raise ModbusError(
                 f"连接失败: {self.host}:{self.port} ({type(e).__name__}: {e})")
         self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        if self.drain_first:
+            self.drained_bytes += len(_drain_socket(self.sock))
         return self
 
     def __exit__(self, *exc):
@@ -84,7 +122,26 @@ class ModbusTCPClient:
         return buf
 
     def read(self, fc: int, address: int, count: int = 1):
-        """读寄存器, 返回原始整数列表; count=1 时返回单个整数。"""
+        """读寄存器, 返回原始整数列表; count=1 时返回单个整数。
+
+        多主机共用总线时必须重试: 串行链路上的应答没有路由标识, 撞车时收到
+        的可能是别的主机那一帧。这里遇到"疑似串帧"就排空缓冲重来一次。
+        """
+        last = None
+        for attempt in range(self.retries + 1):
+            try:
+                return self._read_once(fc, address, count)
+            except ModbusError as e:
+                last = e
+                if "异常码" in str(e):          # 设备明确拒绝, 重试没意义
+                    raise
+                if attempt < self.retries:
+                    self.drained_bytes += len(_drain_socket(self.sock))
+                    continue
+                raise
+        raise last
+
+    def _read_once(self, fc: int, address: int, count: int = 1):
         if self.sock is None:
             self.__enter__()
         self._tid = (self._tid + 1) & 0xFFFF
@@ -99,12 +156,21 @@ class ModbusTCPClient:
                 "响应超时: 设备已接受连接但对请求无应答"
                 "(常见原因: 从站地址不对/功能码不对/设备忙)")
         _tid, _pid, length, _unit = struct.unpack(">HHHB", head)
+        # 事务号对不上 = 收到的是别的主机那一帧。个别廉价网关会固定回 0,
+        # 所以这里只记日志不判死, 由 RTU 链路的从站号校验兜底。
+        if _tid not in (self._tid, 0):
+            logger.debug(f"[modbus] {self.host}:{self.port} 事务号不匹配"
+                         f"(请求 {self._tid}, 应答 {_tid}) —— 疑似多主机串帧")
         body = self._recv_exact(max(length - 1, 0))
         if body and body[0] & 0x80:
             code = body[1] if len(body) > 1 else 0
             raise ModbusError(f"异常码 {code}: {EXC_TEXT.get(code, '未知')}")
 
         nbytes = body[1]
+        # 应答比请求的还多 = 帧边界错位, 后面全解析错了, 必须丢掉重来
+        _expect = (count + 7) // 8 if fc in (FC_READ_COILS, FC_READ_DISCRETE) else count * 2
+        if nbytes > _expect:
+            raise ModbusError(f"响应字节数异常({nbytes} > {_expect}) —— 疑似串帧")
         data = body[2:2 + nbytes]
         if fc in (FC_READ_COILS, FC_READ_DISCRETE):
             bits = []
@@ -137,9 +203,13 @@ class ModbusRTUOverTCP:
     界面/建设备时 protocol 选 "modbus_rtu" 即走这条链路。
     """
 
-    def __init__(self, host: str, port: int, slave: int = 1, timeout: float = 3.0):
+    def __init__(self, host: str, port: int, slave: int = 1, timeout: float = 3.0,
+                 drain_first: bool = True, retries: int = 2):
         self.host, self.port, self.slave = host, port, slave
         self.timeout = timeout
+        self.drain_first = drain_first
+        self.retries = retries
+        self.drained_bytes = 0
         self.sock: Optional[socket.socket] = None
 
     def __enter__(self):
@@ -153,6 +223,8 @@ class ModbusRTUOverTCP:
             raise ModbusError(
                 f"连接失败: {self.host}:{self.port} ({type(e).__name__}: {e})")
         self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        if self.drain_first:
+            self.drained_bytes += len(_drain_socket(self.sock))
         return self
 
     def __exit__(self, *exc):
@@ -173,7 +245,26 @@ class ModbusRTUOverTCP:
         return buf
 
     def read(self, fc: int, address: int, count: int = 1):
-        """发裸 RTU 帧读寄存器, 返回值与 ModbusTCPClient.read 对齐。"""
+        """发裸 RTU 帧读寄存器, 返回值与 ModbusTCPClient.read 对齐。
+
+        多主机共用同一条 RS-485 时这是**必需**的重试: 应答没有路由标识,
+        撞车就会读到别人那一帧(从站号不匹配/字节数超限), 排空缓冲重来即可。
+        """
+        last = None
+        for attempt in range(self.retries + 1):
+            try:
+                return self._read_once(fc, address, count)
+            except ModbusError as e:
+                last = e
+                if "异常码" in str(e):          # 设备明确拒绝, 重试没意义
+                    raise
+                if attempt < self.retries:
+                    self.drained_bytes += len(_drain_socket(self.sock))
+                    continue
+                raise
+        raise last
+
+    def _read_once(self, fc: int, address: int, count: int = 1):
         if self.sock is None:
             self.__enter__()
         pdu = bytes([self.slave & 0xFF, fc]) + struct.pack(">HH", address, count)
@@ -189,6 +280,10 @@ class ModbusRTUOverTCP:
         if rfc & 0x80:                       # 异常帧: +1 字节异常码(已在 third) +2 CRC
             self._recv_exact(2)
             raise ModbusError(f"异常码 {third}: {EXC_TEXT.get(third, '未知')}")
+        # 应答比请求的还多 = 帧边界已经错位, 后面全是脏数据, 直接丢
+        _expect = (count + 7) // 8 if fc in (FC_READ_COILS, FC_READ_DISCRETE) else count * 2
+        if third > _expect:
+            raise ModbusError(f"响应字节数异常({third} > {_expect}) —— 疑似串帧")
         data = self._recv_exact(third) if third > 0 else b""
         self._recv_exact(2)                  # CRC
         if slave != (self.slave & 0xFF):
@@ -269,6 +364,62 @@ def _to_metric(value: float, point: EnvPoint) -> float:
     return float(value)
 
 
+def _point_len(point) -> int:
+    """点位占几个寄存器(32 位占 2 个)。"""
+    return 2 if (point.data_type or "").lower() in ("u32", "s32") else 1
+
+
+def _plan_reads(points: list, max_span: int = 24) -> list:
+    """把多个点位合并成尽量少的读请求。
+
+    为什么 —— 多主机共用一条 RS-485 时, 每一帧都是一次撞车机会。
+    原来一个点位发一次请求(精密空调 7 个点位 = 7 帧), 现在地址相近的
+    合并成一次块读, 帧数通常降到 1~2, 撞车概率同比大幅下降。
+
+    跨度上限设 24: 再大有些设备会截断或直接报异常码 2(现场那台设备
+    请求 32 个只回 12 个), 一旦读不通会由 _bulk_read 自动退回逐点读。
+    """
+    groups = {}
+    for p in points:
+        groups.setdefault(p.fc or FC_READ_HOLDING, []).append(p)
+    plans = []
+    for fc, ps in groups.items():
+        ps = sorted(ps, key=lambda x: x.address or 0)
+        cur = [ps[0]]
+        for p in ps[1:]:
+            if (p.address or 0) + _point_len(p) - (cur[0].address or 0) <= max_span:
+                cur.append(p)
+            else:
+                plans.append((fc, cur))
+                cur = [p]
+        plans.append((fc, cur))
+    return plans
+
+
+def _bulk_read(client, fc: int, ps: list):
+    """一次把这一组点位全读出来。读不通/被截断返回 None, 交给上层退回逐点读。"""
+    lo = ps[0].address or 0
+    n = max((p.address or 0) + _point_len(p) for p in ps) - lo
+    if n < 1:
+        return None
+    try:
+        vals = client.read(fc, lo, n)
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(vals, list) or len(vals) < n:
+        return None
+    return lo, vals
+
+
+def _read_point_safe(client, point):
+    """单个点位读取, 统一返回 (值, 原始值, 成功?, 错误)。"""
+    try:
+        value, raw = read_point(client, point)
+        return value, raw, True, ""
+    except Exception as e:  # noqa: BLE001
+        return None, None, False, f"{type(e).__name__}: {e}"
+
+
 # ---------------------------------------------------------------------------
 # 设备轮询
 # ---------------------------------------------------------------------------
@@ -287,16 +438,37 @@ async def poll_device(db: AsyncSession, device: EnvDevice,
         return res
 
     def _do() -> list:
-        """在子线程里跑: 一次连接把所有点位读完, 省掉反复握手。"""
-        out = []
+        """在子线程里跑: 一次连接读完所有点位, 同 fc 且地址相近的合并成块读。"""
+        rows, stale = {}, 0
         with make_client(device) as client:
-            for p in active:
-                try:
-                    value, raw = read_point(client, p)
-                    out.append((p.id, value, raw, True, ""))
-                except Exception as e:
-                    out.append((p.id, None, None, False, f"{type(e).__name__}: {e}"))
-        return out
+            stale = getattr(client, "drained_bytes", 0)
+            for fc, ps in _plan_reads(active):
+                done = set()
+                if len(ps) > 1:
+                    got = _bulk_read(client, fc, ps)
+                    if got:
+                        lo, vals = got
+                        for p in ps:
+                            off = (p.address or 0) - lo
+                            try:
+                                raw = vals[off]
+                                if _point_len(p) == 2:
+                                    raw = (vals[off] << 16) | vals[off + 1]
+                                v = _apply_type(raw, p.data_type, p.bit_index)
+                                v = v * (p.scale if p.scale is not None else 1.0) \
+                                    + (p.offset or 0.0)
+                                rows[p.id] = (round(v, 3), int(raw), True, "")
+                                done.add(p.id)
+                            except Exception:  # noqa: BLE001
+                                pass          # 取不到的退回逐点读
+                for p in ps:
+                    if p.id not in done:
+                        rows[p.id] = _read_point_safe(client, p)
+        if stale:
+            logger.info(f"[动环] {device.name}({device.ip}:{device.port}) "
+                        f"丢弃陈旧帧 {stale}B —— 该串口口有第二主机在轮询, "
+                        f"若仍报错建议错峰或停掉对方对该口的采集")
+        return [(pid, *rows[pid]) for pid in rows]
 
     try:
         rows = await asyncio.wait_for(asyncio.to_thread(_do), timeout=25)
