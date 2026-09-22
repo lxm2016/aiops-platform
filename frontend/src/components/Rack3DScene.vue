@@ -16,11 +16,22 @@
       </el-tooltip>
     </div>
 
+    <!-- 区域层级导航 -->
+    <div class="zone-crumb">
+      <el-button link size="small" :type="focusedZone ? '' : 'primary'" @click="focusOverview">全部院区</el-button>
+      <template v-if="focusedZone">
+        <span class="crumb-sep">/</span>
+        <span class="crumb-cur">{{ focusedZone }}</span>
+        <el-button link size="small" type="primary" @click="focusOverview">返回总览</el-button>
+      </template>
+      <span v-else class="crumb-hint">点击院区标牌或地面区域可放大进入</span>
+    </div>
+
     <!-- 悬浮信息卡 -->
     <transition name="fade">
       <div v-if="hoverInfo.visible" class="hover-card" :style="{ left: hoverInfo.x + 'px', top: hoverInfo.y + 'px' }">
         <div class="hc-title">{{ hoverInfo.name }}</div>
-        <div class="hc-row" v-if="hoverInfo.row">列: <b>{{ hoverInfo.row }}</b></div>
+        <div class="hc-row" v-if="hoverInfo.row">区域: <b>{{ hoverInfo.row }}</b></div>
         <div class="hc-row">高度: <b>{{ hoverInfo.uHeight }}U</b></div>
         <div class="hc-row">设备: <b>{{ hoverInfo.deviceCount }}台</b> · 已用 <b>{{ hoverInfo.usedU }}U</b></div>
         <div class="hc-row">
@@ -60,10 +71,14 @@ const emit = defineEmits(['rack-click', 'clear-search'])
 const containerRef = ref(null)
 const autoRotate = ref(false)
 const searchResult = ref(null)
+const focusedZone = ref(null)
 
 let scene, camera, renderer, controls, raycaster, mouse
-let rackGroup, floor, gridHelper
+let rackGroup, zoneGroup, floor, gridHelper
 let rackMeshes = [] // {rack, group, ledMeshes[]}
+let zonePads = []   // {key, name, center:{x,z}, w, d}
+let hasFitCamera = false
+let lastLayoutKey = ''
 let animationId = null
 let highlightRing = null
 
@@ -187,6 +202,10 @@ function initScene() {
   // 机柜组
   rackGroup = new THREE.Group()
   scene.add(rackGroup)
+
+  // 院区/区域标牌与地面组
+  zoneGroup = new THREE.Group()
+  scene.add(zoneGroup)
 
   // 射线检测
   raycaster = new THREE.Raycaster()
@@ -394,9 +413,9 @@ function createRackModel(rack, position) {
   return { group, ledMeshes }
 }
 
-// ========== 构建所有机柜 ==========
+// ========== 构建所有机柜（按院区/区域分区布置） ==========
 function buildRacks() {
-  // 清除旧机柜
+  // 清除旧机柜与旧区域
   if (rackGroup) {
     while (rackGroup.children.length > 0) {
       const child = rackGroup.children[0]
@@ -404,47 +423,157 @@ function buildRacks() {
       disposeObject(child)
     }
   }
+  if (zoneGroup) {
+    while (zoneGroup.children.length > 0) {
+      const child = zoneGroup.children[0]
+      zoneGroup.remove(child)
+      disposeObject(child)
+    }
+  }
   rackMeshes = []
+  zonePads = []
 
   if (!props.racks.length) return
 
-  // 按列分组
-  const rows = {}
+  // 按所属院区/机房位置(row_name)分区, 各区域在地面独立成块
+  const zones = {}
   for (const r of props.racks) {
-    const key = r.row_name || 'A'
-    ;(rows[key] = rows[key] || []).push(r)
+    const key = (r.row_name || '').trim() || '未分区'
+    ;(zones[key] = zones[key] || []).push(r)
   }
+  const zoneKeys = Object.keys(zones).sort()
 
-  const rowKeys = Object.keys(rows).sort()
-  const rackSpacing = 100 // 机柜间距
-  const rowSpacing = 200 // 列间距
-  const rackD = 80
+  const rackSpacing = 100  // 机柜间距
+  const rowSpacing = 170   // 区域内排距
+  const perRow = 6         // 每排最多机柜数
+  const zoneGap = 340      // 院区之间的间距
 
-  let rowIdx = 0
-  for (const rowName of rowKeys) {
-    const racksInRow = rows[rowName].sort((a, b) => a.name.localeCompare(b.name))
-    const rowWidth = racksInRow.length * rackSpacing
-    const startX = -rowWidth / 2 + rackSpacing / 2
-    const z = (rowIdx - (rowKeys.length - 1) / 2) * rowSpacing
+  const zoneInfos = zoneKeys.map(key => {
+    const racksInZone = zones[key].sort((a, b) => a.name.localeCompare(b.name))
+    const cols = Math.min(racksInZone.length, perRow)
+    const rowsCount = Math.ceil(racksInZone.length / perRow)
+    return {
+      key,
+      racks: racksInZone,
+      cols,
+      rowsCount,
+      w: cols * rackSpacing + 160,
+      d: rowsCount * rowSpacing + 120
+    }
+  })
 
-    racksInRow.forEach((rack, i) => {
-      const x = startX + i * rackSpacing
-      const { group, ledMeshes } = createRackModel(rack, { x, z })
+  const totalW = zoneInfos.reduce((s, z) => s + z.w, 0) + zoneGap * (zoneInfos.length - 1)
+  let cursorX = -totalW / 2
+
+  for (const z of zoneInfos) {
+    const cx = cursorX + z.w / 2
+    const cz = 0
+
+    z.racks.forEach((rack, i) => {
+      const col = i % perRow
+      const row = Math.floor(i / perRow)
+      const x = cx - (z.cols * rackSpacing) / 2 + rackSpacing / 2 + col * rackSpacing
+      const rz = (row - (z.rowsCount - 1) / 2) * rowSpacing
+      const { group, ledMeshes } = createRackModel(rack, { x, z: rz })
       rackGroup.add(group)
-      rackMeshes.push({ rack, group, ledMeshes })
+      rackMeshes.push({ rack, group, ledMeshes, zone: z.key })
     })
 
-    rowIdx++
+    createZonePad(z, cx, cz)
+    cursorX += z.w + zoneGap
   }
 
-  // 调整相机到合适位置
-  if (props.racks.length > 0) {
-    const totalRacks = props.racks.length
-    const dist = Math.max(400, totalRacks * 50)
-    camera.position.set(dist * 0.7, dist * 0.6, dist)
-    controls.target.set(0, 100, 0)
-    controls.update()
+  // 首次构建或布局变化时才调整相机, 避免定时刷新把用户视角拉回去
+  const layoutKey = zoneKeys.join('|') + '#' + props.racks.length
+  if (!hasFitCamera || layoutKey !== lastLayoutKey) {
+    fitOverview(true)
+    hasFitCamera = true
+    lastLayoutKey = layoutKey
   }
+  // 当前聚焦的区域被删除时回到总览
+  if (focusedZone.value && !zonePads.some(p => p.key === focusedZone.value)) {
+    focusedZone.value = null
+  }
+}
+
+// ========== 院区标牌与地面区域 ==========
+function createZonePad(z, cx, cz) {
+  const devCount = z.racks.reduce((s, r) => s + (props.devicesMap[r.id] || []).length, 0)
+
+  const pad = new THREE.Mesh(
+    new THREE.PlaneGeometry(z.w, z.d),
+    new THREE.MeshBasicMaterial({ color: 0x0b2242, transparent: true, opacity: 0.32 })
+  )
+  pad.rotation.x = -Math.PI / 2
+  pad.position.set(cx, 0.8, cz)
+  pad.userData = { type: 'zone', zoneKey: z.key }
+  zoneGroup.add(pad)
+
+  const edge = new THREE.LineSegments(
+    new THREE.EdgesGeometry(new THREE.PlaneGeometry(z.w, z.d)),
+    new THREE.LineBasicMaterial({ color: 0x00d4ff, transparent: true, opacity: 0.4 })
+  )
+  edge.rotation.x = -Math.PI / 2
+  edge.position.set(cx, 1.0, cz)
+  zoneGroup.add(edge)
+
+  // 区域标牌(Sprite, 始终面向相机): 院区名 + 机柜/设备数
+  const tex = makeLabelTexture(`zone-${z.key}-${z.racks.length}-${devCount}`, 512, 128, (ctx, w, h) => {
+    ctx.fillStyle = 'rgba(7,18,36,0.88)'
+    ctx.fillRect(0, 0, w, h)
+    ctx.strokeStyle = 'rgba(0,212,255,0.55)'
+    ctx.lineWidth = 3
+    ctx.strokeRect(2, 2, w - 4, h - 4)
+    ctx.fillStyle = '#00d4ff'
+    ctx.font = 'bold 46px sans-serif'
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    ctx.fillText(z.key, w / 2, 44)
+    ctx.fillStyle = 'rgba(220,232,248,0.75)'
+    ctx.font = '28px sans-serif'
+    ctx.fillText(`${z.racks.length} 台机柜 · ${devCount} 台设备`, w / 2, 92)
+  })
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true }))
+  sprite.scale.set(300, 75, 1)
+  sprite.position.set(cx, 320, cz)
+  sprite.userData = { type: 'zone', zoneKey: z.key }
+  zoneGroup.add(sprite)
+
+  zonePads.push({ key: z.key, name: z.key, center: { x: cx, z: cz }, w: z.w, d: z.d })
+}
+
+// ========== 院区聚焦 / 总览 ==========
+function focusZone(key) {
+  const z = zonePads.find(p => p.key === key)
+  if (!z) return
+  focusedZone.value = key
+  const dist = Math.max(z.w, z.d) * 1.35 + 260
+  animateCamera(
+    new THREE.Vector3(z.center.x + dist * 0.42, dist * 0.5, z.center.z + dist * 0.78),
+    new THREE.Vector3(z.center.x, 90, z.center.z)
+  )
+}
+
+function fitOverview(immediate) {
+  focusedZone.value = null
+  if (!zonePads.length) return
+  const minX = Math.min(...zonePads.map(p => p.center.x - p.w / 2))
+  const maxX = Math.max(...zonePads.map(p => p.center.x + p.w / 2))
+  const totalW = maxX - minX
+  const dist = Math.max(520, totalW * 0.85)
+  const camPos = new THREE.Vector3(dist * 0.35, dist * 0.5, dist * 0.8)
+  const look = new THREE.Vector3(0, 80, 0)
+  if (immediate) {
+    camera.position.copy(camPos)
+    controls.target.copy(look)
+    controls.update()
+  } else {
+    animateCamera(camPos, look)
+  }
+}
+
+function focusOverview() {
+  fitOverview(false)
 }
 
 // ========== 高亮机柜 ==========
@@ -569,7 +698,27 @@ function onClick(event) {
       rm.group === obj || rm.group.children.includes(obj) || isDescendant(rm.group, obj)
     )
     if (rackMesh) {
-      emit('rack-click', rackMesh.rack)
+      // 相机先旋转聚焦到该机柜, 随后打开3D详情
+      const p = rackMesh.group.position
+      animateCamera(
+        new THREE.Vector3(p.x + 170, 170, p.z + 240),
+        new THREE.Vector3(p.x, 100, p.z)
+      )
+      setTimeout(() => emit('rack-click', rackMesh.rack), 600)
+      return
+    }
+  }
+
+  // 没点到机柜 → 看是否点在院区标牌/地面区域上, 是则放大进入该区域
+  if (zoneGroup) {
+    const zHits = raycaster.intersectObjects(zoneGroup.children, true)
+    for (const h of zHits) {
+      let node = h.object
+      while (node && node.userData?.type !== 'zone') node = node.parent
+      if (node?.userData?.zoneKey) {
+        focusZone(node.userData.zoneKey)
+        return
+      }
     }
   }
 }
@@ -628,7 +777,7 @@ function onResize() {
 }
 
 function resetCamera() {
-  animateCamera(new THREE.Vector3(600, 500, 800), new THREE.Vector3(0, 100, 0))
+  focusOverview()
 }
 
 function topView() {
@@ -688,6 +837,12 @@ onBeforeUnmount(() => {
       containerRef.value.removeChild(renderer.domElement)
     }
   }
+  if (zoneGroup) {
+    zoneGroup.traverse(o => {
+      if (o.geometry) o.geometry.dispose()
+      if (o.material) o.material.dispose()
+    })
+  }
   texCache.forEach(t => t.dispose())
   texCache.clear()
   scene = null
@@ -729,6 +884,24 @@ onBeforeUnmount(() => {
   gap: 8px;
   z-index: 10;
 }
+
+.zone-crumb {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  background: rgba(6, 13, 26, 0.85);
+  border: 1px solid rgba(0, 212, 255, 0.3);
+  border-radius: 16px;
+  backdrop-filter: blur(8px);
+}
+.crumb-sep { color: rgba(125, 146, 181, 0.6); font-size: 12px; }
+.crumb-cur { font-size: 13px; font-weight: 600; color: #00d4ff; }
+.crumb-hint { font-size: 12px; color: rgba(125, 146, 181, 0.75); }
 
 .hover-card {
   position: absolute;

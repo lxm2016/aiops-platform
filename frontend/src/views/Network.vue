@@ -78,7 +78,7 @@
           <el-input v-model="form.name" placeholder="设备名称" />
         </el-form-item>
         <el-form-item label="IP地址" prop="ip">
-          <el-input v-model="form.ip" placeholder="如 192.168.1.1" />
+          <el-input v-model="form.ip" />
         </el-form-item>
         <el-form-item label="厂商">
           <el-input v-model="form.vendor" placeholder="如 Huawei / H3C / Cisco" />

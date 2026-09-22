@@ -179,15 +179,11 @@
               :label="c.label" :value="c.value"
             />
           </el-select>
-          <div class="tip">
-            选类型后会自动预置常见点位（温湿度 0x0000/0x0001、烟感 1、水浸 1 等），
-            地址不对再改。
-          </div>
         </el-form-item>
         <el-row :gutter="12">
           <el-col :span="14">
             <el-form-item label="IP 地址" required>
-              <el-input v-model="devForm.ip" placeholder="如 172.16.0.238" />
+              <el-input v-model="devForm.ip" />
             </el-form-item>
           </el-col>
           <el-col :span="10">
@@ -205,9 +201,6 @@
                   :label="p.label" :value="p.value"
                 />
               </el-select>
-              <div class="tip">
-                连得上但一直超时 → 多半是串口服务器在透传模式，选 RTU over TCP
-              </div>
             </el-form-item>
           </el-col>
           <el-col :span="7">
@@ -230,12 +223,12 @@
         <el-row :gutter="12">
           <el-col :span="12">
             <el-form-item label="采集集群">
-              <el-input v-model="devForm.cluster" placeholder="如 南部院区 / 总部院区" />
+              <el-input v-model="devForm.cluster" />
             </el-form-item>
           </el-col>
           <el-col :span="12">
             <el-form-item label="资源组">
-              <el-input v-model="devForm.resource_group" placeholder="如 机房环境设备 / UPS" />
+              <el-input v-model="devForm.resource_group" />
             </el-form-item>
           </el-col>
         </el-row>
@@ -258,7 +251,7 @@
         <el-row :gutter="12">
           <el-col :span="12">
             <el-form-item label="点位名称" required>
-              <el-input v-model="ptForm.name" placeholder="如 温度" />
+              <el-input v-model="ptForm.name" />
             </el-form-item>
           </el-col>
           <el-col :span="12">
@@ -269,7 +262,6 @@
                   :label="k.label + '（' + k.value + '）'" :value="k.value"
                 />
               </el-select>
-              <div class="tip">填了才参与告警；只监控不告警可留空</div>
             </el-form-item>
           </el-col>
         </el-row>
@@ -310,20 +302,18 @@
                 v-model="ptForm.scale" :step="0.1" :precision="4"
                 style="width:100%"
               />
-              <div class="tip">原始值 × 系数 + 偏移 = 显示值；温湿度常用 0.1</div>
             </el-form-item>
           </el-col>
         </el-row>
         <el-row :gutter="12">
           <el-col :span="12">
             <el-form-item label="单位">
-              <el-input v-model="ptForm.unit" placeholder="℃ / % / V / A" />
+              <el-input v-model="ptForm.unit" />
             </el-form-item>
           </el-col>
           <el-col :span="12">
             <el-form-item label="点位分组">
-              <el-input v-model="ptForm.group" placeholder="如 交流输入 / 电池" />
-              <div class="tip">同分组点位在列表里归到一个小节标题下</div>
+              <el-input v-model="ptForm.group" />
             </el-form-item>
           </el-col>
         </el-row>
@@ -331,7 +321,6 @@
           <el-col :span="12">
             <el-form-item label="报警值">
               <el-input-number v-model="ptForm.alarm_value" style="width:100%" />
-              <div class="tip">开关量用：读数等于该值即报警（烟感/水浸填 1）</div>
             </el-form-item>
           </el-col>
         </el-row>
@@ -342,7 +331,6 @@
               ? `原始值 ${testResult.raw} → 显示值 ${testResult.value}`
               : testResult.error }}
           </span>
-          <div class="tip">先试读确认地址和系数填对，再保存</div>
         </el-form-item>
       </el-form>
       <template #footer>

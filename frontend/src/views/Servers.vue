@@ -79,7 +79,7 @@
           <el-input v-model="form.name" placeholder="服务器名称" />
         </el-form-item>
         <el-form-item label="IP地址" prop="ip">
-          <el-input v-model="form.ip" placeholder="如 192.168.1.10" />
+          <el-input v-model="form.ip" />
         </el-form-item>
         <el-form-item label="系统类型" prop="os_type">
           <el-select v-model="form.os_type" style="width: 100%">

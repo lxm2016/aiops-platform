@@ -29,7 +29,7 @@
       </span>
       <span class="legend-item"><i class="led-dot led-on"></i>在线</span>
       <span class="legend-item"><i class="led-dot led-warn"></i>告警</span>
-      <span class="legend-tip">鼠标拖拽旋转 · 滚轮缩放 · 点击机柜进入3D详情 · 搜索定位设备</span>
+      <span class="legend-tip">按所属院区分区展示 · 点击院区标牌放大进入 · 点击机柜旋转聚焦并查看3D详情 · 搜索定位设备</span>
     </div>
 
     <!-- 大屏模式信息条 -->
@@ -64,7 +64,7 @@
       </div>
       <el-table :data="racks" size="small" border>
         <el-table-column prop="name" label="机柜编号" width="100" />
-        <el-table-column prop="row_name" label="所在列" width="90" />
+        <el-table-column prop="row_name" label="所属院区" width="110" />
         <el-table-column prop="u_height" label="U数" width="60" />
         <el-table-column label="设备数" width="70">
           <template #default="{ row }">{{ (devicesMap[row.id] || []).length }}</template>
@@ -197,8 +197,8 @@
         <el-form-item label="机柜编号" prop="name">
           <el-input v-model="rackForm.name" placeholder="如 A01" />
         </el-form-item>
-        <el-form-item label="所在列" prop="row_name">
-          <el-input v-model="rackForm.row_name" placeholder="如 A列" />
+        <el-form-item label="所属院区" prop="row_name">
+          <el-input v-model="rackForm.row_name" />
         </el-form-item>
         <el-form-item label="U数" prop="u_height">
           <el-input-number v-model="rackForm.u_height" :min="1" :max="60" style="width: 100%" />
@@ -426,7 +426,7 @@ const rackFormRef = ref(null)
 const rackForm = reactive({ id: null, name: '', row_name: 'A列', u_height: 42, remark: '' })
 const rackRules = {
   name: [{ required: true, message: '请输入机柜编号', trigger: 'blur' }],
-  row_name: [{ required: true, message: '请输入所在列', trigger: 'blur' }]
+  row_name: [{ required: true, message: '请输入所属院区', trigger: 'blur' }]
 }
 
 function openRackDialog(rack) {
