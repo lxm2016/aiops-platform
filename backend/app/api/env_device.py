@@ -98,8 +98,12 @@ CATEGORY_LABELS = {
 #   实际 wire 地址 = 编号-1 (30001 -> 30000), 用探测器 --start 30000 可核对。
 CATEGORY_TEMPLATES = {
     "temp_humidity": [
-        {"name": "湿度", "key": "humidity", "address": 0, "scale": 0.1, "unit": "%"},
-        {"name": "温度", "key": "temperature", "address": 1, "scale": 0.1, "unit": "℃"},
+        # 现场实测: 寄存器 0=湿度, 1=温度, 倍率 0.1。
+        # 温度必须是**有符号 s16**(零下环境 u16 会显示成 6553.x℃)。
+        {"name": "湿度", "key": "humidity", "fc": 3, "address": 0,
+         "scale": 0.1, "unit": "%", "data_type": "u16", "group": "温湿度"},
+        {"name": "温度", "key": "temperature", "fc": 3, "address": 1,
+         "scale": 0.1, "unit": "℃", "data_type": "s16", "group": "温湿度"},
     ],
     "smoke": [
         {"name": "烟雾状态", "key": "smoke", "fc": 2, "address": 0,

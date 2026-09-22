@@ -28,13 +28,13 @@ fi
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "[1/8] 检查部署目录..."
+echo "[1/9] 检查部署目录..."
 [ -d "$DST/backend" ] || { echo "[错误] 未找到 $DST/backend, 请先完成首次部署, 或用 AIOPS_DST= 指定路径"; exit 1; }
 [ -x "$DST/backend/venv/bin/python" ] || { echo "[错误] 未找到 $DST/backend/venv, 请先完成首次后端安装"; exit 1; }
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "[2/8] 备份现有代码与数据库..."
+echo "[2/9] 备份现有代码与数据库..."
 mkdir -p "$DST/backup"
 if [ -f "$DST/backend/aiops.db" ]; then
     cp -f "$DST/backend/aiops.db" "$DST/backup/aiops_$TS.db"
@@ -47,7 +47,7 @@ fi
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "[3/8] 更新后端代码..."
+echo "[3/9] 更新后端代码..."
 rm -rf "$DST/backend/app"
 cp -r "$SCRIPT_DIR/backend/app" "$DST/backend/"
 find "$DST/backend/app" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
@@ -55,7 +55,7 @@ echo "  后端代码更新完成"
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "[4/8] 更新前端..."
+echo "[4/9] 更新前端..."
 if [ -d "$SCRIPT_DIR/frontend-dist" ]; then
     rm -rf "$DST/frontend-dist"
     cp -r "$SCRIPT_DIR/frontend-dist" "$DST/"
@@ -66,7 +66,7 @@ fi
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "[5/8] 安装脚本与 systemd 服务..."
+echo "[5/9] 安装脚本与 systemd 服务..."
 mkdir -p "$DST/scripts"
 cp -f "$SCRIPT_DIR/scripts/nginx-aiops.conf" "$DST/scripts/" 2>/dev/null || true
 if [ -f "$SCRIPT_DIR/scripts/aiops-watchdog.sh" ]; then
@@ -93,7 +93,7 @@ fi
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "[6/8] 更新 Nginx 配置..."
+echo "[6/9] 更新 Nginx 配置..."
 if [ -f "$SCRIPT_DIR/scripts/nginx-aiops.conf" ] && [ -d /etc/nginx/conf.d ]; then
     [ -f /etc/nginx/conf.d/nginx-aiops.conf ] && cp -f /etc/nginx/conf.d/nginx-aiops.conf "$DST/backup/nginx-aiops_$TS.conf"
     cp -f "$SCRIPT_DIR/scripts/nginx-aiops.conf" /etc/nginx/conf.d/nginx-aiops.conf
@@ -121,10 +121,22 @@ if [ -f "$SCRIPT_DIR/tools/probe_voice_box.py" ]; then
     echo "  电话盒子接口探测器 -> $DST/tools/probe_voice_box.py"
     echo "    用法: $DST/backend/venv/bin/python $DST/tools/probe_voice_box.py --ip <盒子IP>"
 fi
+if [ -f "$SCRIPT_DIR/tools/probe_modbus.py" ]; then
+    cp -f "$SCRIPT_DIR/tools/probe_modbus.py" "$DST/tools/"
+    echo "  动环设备(Modbus)点位探测器 -> $DST/tools/probe_modbus.py"
+    echo "    用法: python3 $DST/tools/probe_modbus.py --dev <IP>:<端口>:<从站地址>"
+    echo "          透传/串口服务器请加 --rtu ; 不知道从站地址加 --scan-slave"
+fi
+if [ -f "$SCRIPT_DIR/tools/fix_env_points.py" ]; then
+    cp -f "$SCRIPT_DIR/tools/fix_env_points.py" "$DST/tools/"
+    echo "  温湿度点位校正工具 -> $DST/tools/fix_env_points.py"
+    echo "    用法: $DST/backend/venv/bin/python $DST/tools/fix_env_points.py [--apply]"
+    echo "          (修正历史设备 0=温度 的错误映射, 默认只预览)"
+fi
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "[8/8] 重启后端服务..."
+echo "[8/9] 重启后端服务..."
 if systemctl list-unit-files 2>/dev/null | grep -q '^aiops-backend.service'; then
     systemctl restart aiops-backend
     echo "  已重启 systemd 服务 aiops-backend"
