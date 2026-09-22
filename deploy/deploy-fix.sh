@@ -133,6 +133,12 @@ if [ -f "$SCRIPT_DIR/tools/fix_env_points.py" ]; then
     echo "    用法: $DST/backend/venv/bin/python $DST/tools/fix_env_points.py [--apply]"
     echo "          (修正历史设备 0=温度 的错误映射, 默认只预览)"
 fi
+if [ -f "$SCRIPT_DIR/tools/discover_env.py" ]; then
+    cp -f "$SCRIPT_DIR/tools/discover_env.py" "$DST/tools/"
+    echo "  动环设备批量发现工具 -> $DST/tools/discover_env.py"
+    echo "    用法: python3 $DST/tools/discover_env.py --host <串口服务器IP> \\"
+    echo "              --ports 5001-5008 --slaves 1-16 --rtu [--enroll]"
+fi
 
 # ---------------------------------------------------------------------------
 echo ""
