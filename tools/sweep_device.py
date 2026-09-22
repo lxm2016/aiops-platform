@@ -28,6 +28,7 @@
     # 标准 Modbus TCP(非透传)去掉 --rtu
 """
 import argparse
+import json
 import os
 import sys
 
@@ -121,13 +122,25 @@ def sweep_one(host, port, slave, start, count, timeout, rtu):
         hint.append(f"像是**开关量设备**(烟感/水浸): 判定位在 {which} 的 addr {first_addr}, 值 1=报警/0=正常")
         hint.append(f"  平台点位: 功能码选 {which[-8:]}, 地址 {first_addr}, 数据类型 bit, 报警值 1")
     if 0 in hold and 1 in hold:
-        h, t = hold[0] / 10.0, _s16(hold[1]) / 10.0
-        if 0 < h <= 100 and -40 <= t <= 90:
-            hint.append(f"前两个寄存器像温湿度: 0=湿度 {h:.1f}%, 1=温度 {t:.1f}℃ (注意 0=湿度!)")
+        v0, v1 = hold[0] / 10.0, _s16(hold[1]) / 10.0
+        # 关键判据: 机房温度不可能超过 ~45℃, 谁大谁就只能是湿度。
+        # 现场两种顺序都见过: 南院区独立探头是 0=湿度/1=温度,
+        # 海瑞弗精密空调是 0=温度/1=湿度 —— 靠这条物理判据区分, 不能想当然。
+        if v0 > 45 and v1 <= 45:
+            hint.append(f"温湿度: **0=湿度 {v0:.1f}%, 1=温度 {v1:.1f}℃**"
+                        f"  (依据: {v0:.1f} 超过45℃, 不可能是温度)")
+        elif v1 > 45 and v0 <= 45:
+            hint.append(f"温湿度: **0=温度 {v0:.1f}℃, 1=湿度 {v1:.1f}%**"
+                        f"  (依据: {v1:.1f} 超过45℃, 不可能是温度)")
+        elif 0 < v0 <= 100 and 0 < v1 <= 100:
+            hint.append(f"温湿度(顺序无法从数值判定): 可能 0=温度 {v0:.1f}℃/1=湿度 {v1:.1f}%, "
+                        f"也可能 0=湿度 {v0:.1f}%/1=温度 {v1:.1f}℃")
+            hint.append("  确认办法: 隔半小时再读一次 —— 几乎不动的是温度, 会波动的是湿度")
     if not hint:
         hint.append("未识别出常见模式。把上面的非零点位贴回来, 我据此配映射。")
     for h in hint:
         print(f"    · {h}")
+    return summary
 
 
 def main():
@@ -147,8 +160,32 @@ def main():
     slaves = parse_range(args.slaves) if args.slaves else [args.slave]
     print(f"单设备寄存器全扫   目标 {args.host}:{args.port}   从站 {slaves}   "
           f"{'RTU透传' if rtu else 'Modbus TCP'}   地址 {args.start}~{args.start + args.count - 1}")
+    results = {}
     for s in slaves:
-        sweep_one(args.host, args.port, s, args.start, args.count, args.timeout, rtu)
+        results[s] = sweep_one(args.host, args.port, s, args.start, args.count, args.timeout, rtu)
+
+    # ---- 幽灵从站检测: 多个从站返回完全相同的数据 ----
+    # 现场出现过: 5002 上从站 1 和 12 都读到 addr7=259 完全相同的值,
+    # 说明总线上其实只有一台设备在应答所有地址(或网关透传给了同一台)。
+    # 这种情况下若按从站挨个建设备, 会凭空多出一堆重复设备。
+    if len(slaves) > 1:
+        print("\n" + "=" * 74)
+        print(" 幽灵从站检测")
+        print("=" * 74)
+        sigs = {}
+        for s, summ in results.items():
+            if not summ:
+                continue
+            sig = json.dumps({str(k): sorted(v) for k, v in summ.items()}, sort_keys=True)
+            sigs.setdefault(sig, []).append(s)
+        dup = [v for v in sigs.values() if len(v) > 1]
+        if dup:
+            for group in dup:
+                print(f"  ⚠ 从站 {group} 返回的数据完全相同 —— 疑似同一台物理设备")
+                print("     在应答所有从站地址(或网关把请求都透传给了同一台)。")
+                print("     这些从站多半不是独立设备, 不要挨个建设备。")
+        else:
+            print("  各从站数据不同, 未发现幽灵响应。")
 
 
 if __name__ == "__main__":

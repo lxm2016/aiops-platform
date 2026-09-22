@@ -114,10 +114,27 @@ CATEGORY_TEMPLATES = {
         {"name": "漏水状态", "key": "water", "fc": 1, "address": 0,
          "data_type": "bit", "alarm_value": 1, "unit": ""},
     ],
-    # 精密空调: 各厂家(海瑞弗/维谛/施耐德...)寄存器差异很大, **不预置点位**,
-    # 避免像早期温湿度那样把错误映射带进现场。先跑 tools/sweep_device.py
-    # 探明真实寄存器, 再在界面按实际值加点。
-    "aircon": [],
+    # 精密空调 —— 依据现场 sweep 实测(192.168.204.71:5004 从站1, FC03):
+    #   addr0=24.9  addr1=60.0  addr13=1  addr16=24.0  addr17=2.0  addr18=50.0  addr19=5.0
+    # **重要**: 这台空调的温湿度顺序是 **0=温度、1=湿度**, 与南院区那批独立
+    # 温湿度探头(0=湿度、1=温度)**正好相反**! 所以不能全平台套同一个顺序,
+    # 判据是: 机房温度不可能超过 45℃, 谁大谁就是湿度。
+    "aircon": [
+        {"name": "回风温度", "key": "temperature", "fc": 3, "address": 0,
+         "scale": 0.1, "unit": "℃", "data_type": "s16", "group": "环境"},
+        {"name": "回风湿度", "key": "humidity", "fc": 3, "address": 1,
+         "scale": 0.1, "unit": "%", "data_type": "u16", "group": "环境"},
+        {"name": "运行状态", "fc": 3, "address": 13, "scale": 1, "unit": "",
+         "data_type": "u16", "group": "状态"},
+        {"name": "设定温度", "fc": 3, "address": 16, "scale": 0.1, "unit": "℃",
+         "data_type": "s16", "group": "设定"},
+        {"name": "温度回差", "fc": 3, "address": 17, "scale": 0.1, "unit": "℃",
+         "data_type": "s16", "group": "设定"},
+        {"name": "设定湿度", "fc": 3, "address": 18, "scale": 0.1, "unit": "%",
+         "data_type": "u16", "group": "设定"},
+        {"name": "湿度回差", "fc": 3, "address": 19, "scale": 0.1, "unit": "%",
+         "data_type": "u16", "group": "设定"},
+    ],
     "ups": [
         # ---- 整机交流输入 (FC04 @ 30001~30010 -> 地址 30000~30009) ----
         {"name": "输入A相电压", "key": "ups_voltage", "fc": 4, "address": 30000,
