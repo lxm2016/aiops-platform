@@ -76,6 +76,11 @@ except ImportError:
 # 会一无所获, 这就是"平台采不到华为存储容量"的根本原因。
 # OID 取自 Zabbix 官方模板 huawei_5300v5_snmp / huawei_dorado_snmp。
 HW = "1.3.6.1.4.1.34774.4.1"
+# 存储池容量三件套 —— 单独拎出来是因为它们的**口径容易搞错**, 见 _warn_capacity_gap()
+HW_POOL_TOTAL = f"{HW}.23.4.2.1.7"
+HW_POOL_ALLOC = f"{HW}.23.4.2.1.8"
+HW_POOL_FREE = f"{HW}.23.4.2.1.9"
+HW_LUN_CAP = f"{HW}.19.9.4.1.5"
 OID_HW_STORAGE = [
     ("HW 系统运行状态      ", f"{HW}.1.3.0"),
     ("HW 已用容量(单位MB)  ", f"{HW}.1.4.0"),
@@ -85,7 +90,7 @@ OID_HW_STORAGE = [
     ("HW 存储池健康状态    ", f"{HW}.23.4.2.1.5"),
     ("HW 存储池运行状态    ", f"{HW}.23.4.2.1.6"),
     ("HW 存储池总容量(MB)  ", f"{HW}.23.4.2.1.7"),
-    ("HW 存储池已用(MB)    ", f"{HW}.23.4.2.1.8"),
+    ("HW 存储池已分配(MB)  ", f"{HW}.23.4.2.1.8"),
     ("HW 存储池可用(MB)    ", f"{HW}.23.4.2.1.9"),
     ("HW 控制器 ID         ", f"{HW}.23.5.2.1.1"),
     ("HW 控制器健康        ", f"{HW}.23.5.2.1.2"),
@@ -196,14 +201,75 @@ async def _walk(engine, target, auth, ctx, oid):
     return out
 
 
+def _warn_capacity_gap(total_rows, alloc_rows, free_rows, lun_rows):
+    """存储池容量口径体检 —— 直接算出**正确**的使用率并打印。
+
+    踩过的坑(172.16.10.199 实测):
+        .7 总容量 = 28519332 MB (27.20 TiB)
+        .8        = 138566656       (按 MB 折算是 132.15 TiB)
+        .9 可用   = 12058318 MB (11.50 TiB)
+      · 若照着字段名把 .8 当"已用", 使用率 = 486% → 满盘假告警
+      · .8 其实是**已分配(thin 供给)容量**, 超配 4.86 倍
+      · 真实已用 = 总 - 可用 = 15.70 TiB, 使用率 57.7%
+    所以这里一律用 (总-可用)/总 给数, 并顺带核对 .8 的单位。
+    """
+    def to_map(rows):
+        out = {}
+        for sfx, val in rows or []:
+            try:
+                out[sfx] = int(str(val).strip())
+            except (TypeError, ValueError):
+                continue
+        return out
+
+    tot, alloc, free = (to_map(total_rows), to_map(alloc_rows), to_map(free_rows))
+    if not tot:
+        return
+    tib = 1048576.0
+    lun_kb = sum(to_map(lun_rows).values())
+
+    for sfx, t in sorted(tot.items()):
+        if t <= 0:
+            continue
+        f = free.get(sfx)
+        a = alloc.get(sfx)
+        name = f"实例 {sfx}"
+        if f is not None and 0 <= f <= t:
+            used = t - f
+            print(f"\n  [容量口径] 存储池 {name}: 总 {t / tib:.2f} TiB, "
+                  f"可用 {f / tib:.2f} TiB")
+            print(f"             → 真实已用 {used / tib:.2f} TiB, "
+                  f"使用率 {used / t * 100:.1f}%   (= (总-可用)/总)")
+        else:
+            print(f"\n  [容量口径] 存储池 {name}: 总 {t / tib:.2f} TiB, "
+                  f"可用字段缺失/异常, 无法用(总-可用)推算")
+
+        if a and a > t:
+            # 已分配 > 总容量: 精简配置超配。判断 .8 的单位到底是不是 MB
+            as_mb, as_kb = a / tib, a / tib / 1024
+            print(f"  ⚠ 该池 .8(已分配)= {a} 折算: MB→{as_mb:.2f} TiB, KB→{as_kb:.2f} TiB")
+            if lun_kb:
+                lun_tib = lun_kb / tib / 1024   # LUN 单位是 KB
+                print(f"    Σ LUN 容量 = {lun_tib:.2f} TiB; 与之同量级的是 "
+                      f"{'MB' if abs(as_mb - lun_tib) < abs(as_kb - lun_tib) else 'KB'} 口径")
+            print(f"    → 这是**已分配/thin 供给**容量, 超配 {a / t:.2f} 倍, 属正常现象")
+            print(f"    → 切勿用 已分配/总 = {a / t * 100:.1f}% 当使用率, 那是假告警")
+        elif a:
+            print(f"    .8(已分配) = {a} MB ({a / tib:.2f} TiB), 未超过总容量, "
+                  f"此池未超配")
+
+
 async def scan_storage(engine, target, auth, ctx):
     """存储专用: 先探华为私有 MIB, 再探标准 hrStorage, 顺带验证 SNMPv3。"""
     print("\n" + "=" * 78)
     print(" 存储探测 (华为 OceanStor 私有 MIB / 标准 hrStorage 对照)")
     print("=" * 78)
     hub_ok = 0
+    grabbed = {}
     for label, oid in OID_HW_STORAGE:
         rows = await _walk(engine, target, auth, ctx, oid)
+        if oid in (HW_POOL_TOTAL, HW_POOL_ALLOC, HW_POOL_FREE, HW_LUN_CAP):
+            grabbed[oid] = rows or []
         if rows and rows[0][0] == "__error__":
             print(f"{label} {oid}\n    出错: {rows[0][1]}")
             continue
@@ -220,7 +286,11 @@ async def scan_storage(engine, target, auth, ctx):
     if hub_ok:
         print(f"\n[结论] 华为私有 MIB 有 {hub_ok} 张表/标量有数据 —— "
               f"这是台华为 OceanStor, 平台会自动走私有 MIB 采集。")
-        print("       容量字段单位是 MB, 已用/总量相除即使用率; LUN 容量单位是 KB。")
+        print("       容量字段单位是 MB; LUN 容量单位是 KB。")
+        _warn_capacity_gap(grabbed.get(HW_POOL_TOTAL, []),
+                           grabbed.get(HW_POOL_ALLOC, []),
+                           grabbed.get(HW_POOL_FREE, []),
+                           grabbed.get(HW_LUN_CAP, []))
     else:
         print("\n[结论] 华为私有 MIB 无数据。要么不是华为存储, 要么 SNMP 凭据/版本不对,")
         print("       要么上下文名称(context)没填对 —— 华为 DeviceManager 上那一栏要与这里一致。")
