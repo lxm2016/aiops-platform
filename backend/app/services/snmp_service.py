@@ -262,14 +262,28 @@ def _creds(community, version: str):
     if version == "3":
         cfg = community if isinstance(community, dict) else {}
         kwargs = {}
+        # 算法查不到时必须**显式告警**: 现场配了 SHA-256/AES-256 而 pysnmp 不支持时,
+        # 静默退回默认算法的表现是"始终无响应", 极难定位。
+        for key, cfg_key, table, default, label in (
+            ("authProtocol", "auth_proto", AUTH_PROTOCOLS,
+             usmHMACSHAAuthProtocol, "认证"),
+            ("privProtocol", "priv_proto", PRIV_PROTOCOLS,
+             usmAesCfb128Protocol, "加密"),
+        ):
+            want = (cfg.get(cfg_key) or "").lower()
+            pass_key = "auth_pass" if label == "认证" else "priv_pass"
+            if not cfg.get(pass_key):
+                continue
+            if want and want not in table:
+                logger.warning(
+                    f"[SNMP] v3 {label}算法 {want} 当前 pysnmp 不支持, "
+                    f"已退回默认算法 —— 若设备侧配的是该算法, 认证会失败。"
+                    f"可用: {sorted(table)}")
+            kwargs[key] = table.get(want, default)
         if cfg.get("auth_pass"):
             kwargs["authKey"] = cfg["auth_pass"]
-            kwargs["authProtocol"] = AUTH_PROTOCOLS.get(
-                (cfg.get("auth_proto") or "sha").lower(), usmHMACSHAAuthProtocol)
         if cfg.get("priv_pass"):
             kwargs["privKey"] = cfg["priv_pass"]
-            kwargs["privProtocol"] = PRIV_PROTOCOLS.get(
-                (cfg.get("priv_proto") or "aes").lower(), usmAesCfb128Protocol)
         return (UsmUserData(cfg.get("user") or "", **kwargs),
                 # 注意: ContextData 的第一个位置参数是 contextEngineId 不是 contextName!
                 # 写成 ContextData(x) 会把上下文塞进引擎 ID, 设备侧不认, 取不到数据。

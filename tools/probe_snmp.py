@@ -47,6 +47,28 @@ AUTH_PROTOCOLS = {"md5": usmHMACMD5AuthProtocol, "sha": usmHMACSHAAuthProtocol,
 PRIV_PROTOCOLS = {"des": usmDESPrivProtocol, "aes": usmAesCfb128Protocol,
                   "aes128": usmAesCfb128Protocol}
 
+# 现代设备(含华为 OceanStor)常配 SHA-256 / AES-256, 必须支持, 否则认证必然失败。
+# 这些算法在 pysnmp 的部分版本里才有, 装了才挂上; 没装就保持上表的子集。
+try:  # pragma: no cover
+    from pysnmp.hlapi.v3arch.asyncio import (
+        usmHMAC128SHA224AuthProtocol as _sha224,
+        usmHMAC192SHA256AuthProtocol as _sha256,
+        usmHMAC256SHA384AuthProtocol as _sha384,
+        usmHMAC384SHA512AuthProtocol as _sha512,
+    )
+    AUTH_PROTOCOLS.update({"sha224": _sha224, "sha256": _sha256,
+                           "sha384": _sha384, "sha512": _sha512})
+except ImportError:
+    pass
+try:  # pragma: no cover
+    from pysnmp.hlapi.v3arch.asyncio import (
+        usmAesCfb192Protocol as _aes192,
+        usmAesCfb256Protocol as _aes256,
+    )
+    PRIV_PROTOCOLS.update({"aes192": _aes192, "aes256": _aes256})
+except ImportError:
+    pass
+
 # ---------------------------------------------------------------------------
 # 华为 OceanStor 私有 MIB (企业号 34774) —— 存储探测用
 # ---------------------------------------------------------------------------
@@ -108,16 +130,31 @@ def _mp(version):
     return 1 if version == "2c" else 0
 
 
+def _resolve(proto, table, kind):
+    """查算法, 查不到**直接报错** —— 不能静默退回默认算法。
+
+    现场教训: 设备配的是 AES-256, 工具若悄悄按 AES-128 发, 表现就是
+    "始终无响应", 极难排查。宁可当场告诉你这个算法不支持。
+    """
+    if proto in table:
+        return table[proto]
+    raise SystemExit(
+        f"[错误] 不支持的{kind}算法 {proto!r}。"
+        f"当前 pysnmp 支持的: {sorted(table)}\n"
+        f"      若确实需要该算法, 请升级 pysnmp: "
+        f"./backend/venv/bin/pip install -U pysnmp")
+
+
 def _build_auth(args):
     """按命令行参数构造 SNMP 凭据 (v1/v2c 返回团体名, v3 返回 USM 参数)。"""
     if args.v3:
+        auth_proto = _resolve(args.auth_proto, AUTH_PROTOCOLS, "认证")
+        priv_proto = _resolve(args.priv_proto, PRIV_PROTOCOLS, "加密")
         return UsmUserData(
             args.user,
-            **({"authKey": args.auth_pass,
-                "authProtocol": AUTH_PROTOCOLS.get(args.auth_proto, usmHMACSHAAuthProtocol)}
+            **({"authKey": args.auth_pass, "authProtocol": auth_proto}
                if args.auth_pass else {}),
-            **({"privKey": args.priv_pass,
-                "privProtocol": PRIV_PROTOCOLS.get(args.priv_proto, usmAesCfb128Protocol)}
+            **({"privKey": args.priv_pass, "privProtocol": priv_proto}
                if args.priv_pass else {}),
         )
     return CommunityData(args.community, mpModel=_mp(args.version))
@@ -210,10 +247,12 @@ async def main_async(args):
     ctx = _build_ctx(args)
 
     if args.v3:
-        print(f"SNMPv3(USM): 用户={args.user!r} 认证={args.auth_proto} "
-              f"{'(已设密码)' if args.auth_pass else '(无)'} "
-              f"加密={args.priv_proto if args.priv_pass else '无'} "
-              f"上下文={args.context!r}")
+        print(f"SNMPv3(USM): 用户={args.user!r}")
+        print(f"  认证: {args.auth_proto:<8} 密码={'已设' if args.auth_pass else '未设(不认证)'}")
+        print(f"  加密: {args.priv_proto:<8} "
+              f"密码={'已设' if args.priv_pass else '未设(不加密)'}")
+        print(f"  上下文名称: {args.context!r}")
+        print("  ⚠ 算法和密码必须与设备 USM 用户页**逐项一致**, 差一个就完全无响应")
     else:
         print(f"SNMP {args.version}: community={args.community!r}")
 
@@ -304,12 +343,13 @@ def main():
     ap.add_argument("--v3", action="store_true",
                     help="用 SNMPv3。华为 OceanStor 的「SNMPv1&v2c协议开关」"
                          "默认关闭时只能走这条")
-    ap.add_argument("--user", default="", help="v3 USM 用户名")
-    ap.add_argument("--auth-proto", default="sha", choices=["sha", "md5"],
-                    help="v3 认证算法, 必须与设备侧一致")
+    # 别名 --auth-prob: 现场很容易手滑少打一个 t, 与其报"无法识别", 不如直接收下
+    ap.add_argument("--auth-proto", "--auth-prob", dest="auth_proto",
+                    default="sha", choices=sorted(AUTH_PROTOCOLS),
+                    help="v3 认证算法, 必须与设备侧一致(写错必然无响应)")
     ap.add_argument("--auth-pass", default="", help="v3 认证密码")
-    ap.add_argument("--priv-proto", default="aes", choices=["aes", "des"],
-                    help="v3 加密算法, 必须与设备侧一致")
+    ap.add_argument("--priv-proto", default="aes", choices=sorted(PRIV_PROTOCOLS),
+                    help="v3 加密算法, 必须与设备侧一致(写错必然无响应)")
     ap.add_argument("--priv-pass", default="", help="v3 加密密码")
     ap.add_argument("--context", default="",
                     help="v3 上下文名称(对应设备页面上那一栏), 不确定留空")
