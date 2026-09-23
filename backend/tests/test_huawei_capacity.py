@@ -33,6 +33,8 @@ DATA = {
     # 注意: 这两个标量在真机上**都没有数据** —— 正是这条测试存在的理由
     f"{B}.1.3.0": None,
     f"{B}.1.6.0": None,
+    # 私有版本字段不答时, 靠标准 sysDescr 兜底显示型号
+    "1.3.6.1.2.1.1.1.0": "Huawei OceanStor Dorado 5600 V6",
     # 存储池
     f"{B}.23.4.2.1.2": {POOL_SFX: "Flash_Pool_01"},
     f"{B}.23.4.2.1.5": {POOL_SFX: "1"},
@@ -109,6 +111,7 @@ def main():
     print("控制器 running =", [c["running"] for c in d["controllers"]])
     print("硬盘健康分     =", d["disks"][0].get("health_score"))
     print("硬盘数/LUN数   =", len(d["disks"]), "/", len(d["volumes"]))
+    print("型号(兜底)     =", d.get("version"))
 
     ok = True
 
@@ -136,6 +139,8 @@ def main():
     chk("硬盘 12 块", len(d["disks"]), 12)
     chk("LUN 16 个", len(d["volumes"]), 16)
     chk("控制器 2 个", len(d["controllers"]), 2)
+    # 6) 私有版本字段不答时, 型号要能从 sysDescr 兜底出来
+    chk("型号 sysDescr 兜底", d.get("version"), "Huawei OceanStor Dorado 5600 V6")
 
     # 5) 反面: 使用率绝不能越界
     assert 0 <= r["used_percent"] <= 100, "使用率越界"

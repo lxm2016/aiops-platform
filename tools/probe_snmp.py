@@ -81,6 +81,9 @@ HW_POOL_TOTAL = f"{HW}.23.4.2.1.7"
 HW_POOL_ALLOC = f"{HW}.23.4.2.1.8"
 HW_POOL_FREE = f"{HW}.23.4.2.1.9"
 HW_LUN_CAP = f"{HW}.19.9.4.1.5"
+# 标准 MIB 的 sysDescr: 华为存储很多型号不答私有 .1.6.0(设备版本),
+# 但 sysDescr 一定会答 —— 拿它确认型号最稳(如 "OceanStor Dorado 5600 V6")
+OID_SYS_DESCR = "1.3.6.1.2.1.1.1.0"
 OID_HW_STORAGE = [
     ("HW 系统运行状态      ", f"{HW}.1.3.0"),
     ("HW 已用容量(单位MB)  ", f"{HW}.1.4.0"),
@@ -264,6 +267,15 @@ async def scan_storage(engine, target, auth, ctx):
     print("\n" + "=" * 78)
     print(" 存储探测 (华为 OceanStor 私有 MIB / 标准 hrStorage 对照)")
     print("=" * 78)
+
+    # 先报型号: 私有 .1.6.0 很多型号不答, sysDescr 一定答
+    desc = await _get(engine, target, auth, ctx, OID_SYS_DESCR)
+    if desc:
+        first = str(desc).strip().splitlines()[0][:110]
+        print(f"设备自述(sysDescr): {first}\n")
+    else:
+        print("设备自述(sysDescr): (无数据) —— 若整轮都无数据, 先查凭据/网络\n")
+
     hub_ok = 0
     grabbed = {}
     for label, oid in OID_HW_STORAGE:

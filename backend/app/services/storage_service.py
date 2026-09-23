@@ -46,6 +46,9 @@ HW_FAN = f"{HW_BASE}.23.5.4.1"         # 风扇:   .1ID .2位置 .3健康 .4运�
 HW_BBU = f"{HW_BASE}.23.5.5.1"         # 电源/BBU: .1ID .2位置 .3健康 .4运行
 HW_LUN = f"{HW_BASE}.19.9.4.1"         # LUN:    .2名称 .5容量(KB) .11状态
 HW_ENC = f"{HW_BASE}.23.5.6.1"         # 机框:   .2名称 .4健康 .5运行 .8温度
+# 标准 MIB sysDescr: Dorado V6 等型号不答私有 .1.6.0(设备版本), 但它一定答,
+# 用它兜底把型号显示出来(如 "OceanStor Dorado 5600 V6")
+OID_SYS_DESCR = "1.3.6.1.2.1.1.1.0"
 
 # 华为容量字段单位是 MB(模板里统一 ×1048576 得字节); LUN 容量单位是 KB
 _MB = 1024 * 1024
@@ -161,6 +164,11 @@ async def collect_huawei_snmp(ip: str, community, version: str = "2c") -> dict:
         result["details"]["system_status"] = _hw_status(HW_RUNNING, status)
     if ver:
         result["details"]["version"] = str(ver)
+    else:
+        # 私有 .1.6.0 不答时退回标准 sysDescr —— 至少让页面上能看到型号
+        desc = await snmp_get(ip, community, OID_SYS_DESCR, version)
+        if desc:
+            result["details"]["version"] = str(desc).strip().splitlines()[0][:120]
 
     # LUN 容量只取一次: 既用于明细, 也用来反推存储池 .8(已分配) 的单位
     lun_cap_raw = (await snmp_walk(ip, community, f"{HW_LUN}.5", version)
