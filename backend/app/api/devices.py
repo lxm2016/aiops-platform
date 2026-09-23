@@ -226,6 +226,24 @@ async def delete_storage(device_id: int, db: AsyncSession = Depends(get_db)):
     return {"ok": True}
 
 
+def _snmp_cred(device) -> object:
+    """按 snmp_version 组装 SNMP 凭据。
+
+    v3 时返回 USM 参数字典 —— 华为 OceanStor 默认关闭 v1/v2c 开关, 只留
+    USM 用户, 走 v2c 一定失败, 必须把用户/认证/加密/上下文带上。
+    """
+    if (device.snmp_version or "").strip() == "3":
+        return {
+            "user": device.snmp_v3_user or "",
+            "auth_proto": device.snmp_v3_auth_proto or "sha",
+            "auth_pass": device.snmp_v3_auth_pass or "",
+            "priv_proto": device.snmp_v3_priv_proto or "aes",
+            "priv_pass": device.snmp_v3_priv_pass or "",
+            "context": device.snmp_context or "",
+        }
+    return device.snmp_community or "public"
+
+
 @router.post("/storage/{device_id}/poll")
 async def poll_storage(device_id: int, db: AsyncSession = Depends(get_db)):
     """按协议(SNMP/SMI-S)采集存储容量与明细。"""
@@ -235,7 +253,7 @@ async def poll_storage(device_id: int, db: AsyncSession = Depends(get_db)):
 
     data = await collect_storage(
         device.protocol, device.ip,
-        device.snmp_community, device.snmp_version,
+        _snmp_cred(device), device.snmp_version,
         device.username, device.password,
     )
 

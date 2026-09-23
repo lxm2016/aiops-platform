@@ -31,9 +31,49 @@ from typing import Optional
 from pysnmp.hlapi.v3arch.asyncio import (
     SnmpEngine, CommunityData, UdpTransportTarget,
     ContextData, ObjectType, ObjectIdentity, get_cmd, next_cmd, walk_cmd,
+    UsmUserData,
+    usmHMACMD5AuthProtocol, usmHMACSHAAuthProtocol,
+    usmDESPrivProtocol, usmAesCfb128Protocol,
 )
 
 logger = logging.getLogger(__name__)
+
+# --------------------------------------------------------------------------
+# SNMPv3 (USM) 认证 / 加密算法映射
+# --------------------------------------------------------------------------
+# 华为 OceanStor 的 SNMP 设置页里「SNMPv1&SNMPv2c协议开关」默认是**关闭**的,
+# 只留 USM 用户 —— 所以监控这类设备必须支持 v3, 只写 v2c 走不通。
+# 页面上「上下文名称」对应这里 context, 部分设备不填取不到数据。
+AUTH_PROTOCOLS = {
+    "md5": usmHMACMD5AuthProtocol,
+    "sha": usmHMACSHAAuthProtocol,
+    "sha1": usmHMACSHAAuthProtocol,
+}
+PRIV_PROTOCOLS = {
+    "des": usmDESPrivProtocol,
+    "aes": usmAesCfb128Protocol,
+    "aes128": usmAesCfb128Protocol,
+}
+# pysnmp 装了带扩展算法的版本时才有下面这些, 缺失就跳过(不报错)
+try:  # pragma: no cover
+    from pysnmp.hlapi.v3arch.asyncio import (
+        usmHMAC128SHA224AuthProtocol as _sha224,
+        usmHMAC192SHA256AuthProtocol as _sha256,
+        usmHMAC256SHA384AuthProtocol as _sha384,
+        usmHMAC384SHA512AuthProtocol as _sha512,
+    )
+    AUTH_PROTOCOLS.update({"sha224": _sha224, "sha256": _sha256,
+                           "sha384": _sha384, "sha512": _sha512})
+except ImportError:
+    pass
+try:  # pragma: no cover
+    from pysnmp.hlapi.v3arch.asyncio import (
+        usmAesCfb192Protocol as _aes192,
+        usmAesCfb256Protocol as _aes256,
+    )
+    PRIV_PROTOCOLS.update({"aes192": _aes192, "aes256": _aes256})
+except ImportError:
+    pass
 
 # --------------------------------------------------------------------------
 # 超时与限流参数
@@ -204,25 +244,55 @@ for _v in VENDOR_OIDS:
     VENDOR_OIDS[_v]["mem"] = VENDOR_OIDS[_v]["mem_list"][0]
 
 
-def _community(community: str, version: str) -> CommunityData:
-    return CommunityData(community, mpModel=1 if version == "2c" else 0)
+def _creds(community, version: str):
+    """构造 (认证数据, 上下文数据)。
+
+    v1 / v2c : community 传团体名字符串。
+    v3       : community 传 dict —— 因为华为 OceanStor 这类设备出于安全
+               默认**关闭 SNMPv1&v2c 开关**, 只留 USM 用户, 平台上必须能走 v3。
+               dict 字段:
+                 user        用户名 (必填)
+                 auth_proto  md5 / sha / sha256 (空=不认证)
+                 auth_pass   认证密码
+                 priv_proto  des / aes / aes256 (空=不加密)
+                 priv_pass   加密密码
+                 context     上下文名称 —— OceanStor 的 USM 页面上叫"上下文名称",
+                             不填可能取不到数据, 需与设备侧一致
+    """
+    if version == "3":
+        cfg = community if isinstance(community, dict) else {}
+        kwargs = {}
+        if cfg.get("auth_pass"):
+            kwargs["authKey"] = cfg["auth_pass"]
+            kwargs["authProtocol"] = AUTH_PROTOCOLS.get(
+                (cfg.get("auth_proto") or "sha").lower(), usmHMACSHAAuthProtocol)
+        if cfg.get("priv_pass"):
+            kwargs["privKey"] = cfg["priv_pass"]
+            kwargs["privProtocol"] = PRIV_PROTOCOLS.get(
+                (cfg.get("priv_proto") or "aes").lower(), usmAesCfb128Protocol)
+        return (UsmUserData(cfg.get("user") or "", **kwargs),
+                # 注意: ContextData 的第一个位置参数是 contextEngineId 不是 contextName!
+                # 写成 ContextData(x) 会把上下文塞进引擎 ID, 设备侧不认, 取不到数据。
+                ContextData(contextName=cfg.get("context") or ""))
+    return CommunityData(community, mpModel=1 if version == "2c" else 0), ContextData()
 
 
 # --------------------------------------------------------------------------
 # 基础操作 (全部带硬超时 + 复用 engine + 关闭生成器)
 # --------------------------------------------------------------------------
-async def _do_get(ip: str, community: str, oid: str, version: str):
+async def _do_get(ip: str, community, oid: str, version: str):
+    auth, ctx = _creds(community, version)
     return await get_cmd(
         await get_engine(),
-        _community(community, version),
+        auth,
         await _target(ip),
-        ContextData(),
+        ctx,
         ObjectType(ObjectIdentity(oid)),
         lookupMib=False,
     )
 
 
-async def snmp_get(ip: str, community: str, oid: str, version: str = "2c") -> Optional[str]:
+async def snmp_get(ip: str, community, oid: str, version: str = "2c") -> Optional[str]:
     """Perform a single SNMP GET (标量OID)。"""
     try:
         async with _sem():
@@ -241,24 +311,26 @@ async def snmp_get(ip: str, community: str, oid: str, version: str = "2c") -> Op
     return None
 
 
-async def _do_next(ip: str, community: str, oid: str, version: str):
+async def _do_next(ip: str, community, oid: str, version: str):
+    auth, ctx = _creds(community, version)
     return await next_cmd(
         await get_engine(),
-        _community(community, version),
+        auth,
         await _target(ip),
-        ContextData(),
+        ctx,
         ObjectType(ObjectIdentity(oid)),
         lookupMib=False,
     )
 
 
-async def _walk_first(ip: str, community: str, oid: str, version: str) -> Optional[str]:
+async def _walk_first(ip: str, community, oid: str, version: str) -> Optional[str]:
     """walk 取首条 (在 aclosing 内消费, 保证生成器被关闭)。"""
+    auth, ctx = _creds(community, version)
     gen = walk_cmd(
         await get_engine(),
-        _community(community, version),
+        auth,
         await _target(ip),
-        ContextData(),
+        ctx,
         ObjectType(ObjectIdentity(oid)),
         lexicographicMode=False,
         lookupMib=False,
@@ -274,7 +346,7 @@ async def _walk_first(ip: str, community: str, oid: str, version: str) -> Option
     return None
 
 
-async def snmp_get_next(ip: str, community: str, oid: str, version: str = "2c") -> Optional[str]:
+async def snmp_get_next(ip: str, community, oid: str, version: str = "2c") -> Optional[str]:
     """GETNEXT并返回目标OID子树下的首个值 (表类型OID用, 如CPU/内存使用率)。
 
     注意: pysnmp 7.x 的 next_cmd 是普通协程(返回单条结果), 不是异步生成器,
@@ -317,7 +389,7 @@ async def snmp_get_next(ip: str, community: str, oid: str, version: str = "2c") 
     return None
 
 
-async def _get_first_value(ip: str, community: str, oid_list: list, version: str = "2c") -> Optional[str]:
+async def _get_first_value(ip: str, community, oid_list: list, version: str = "2c") -> Optional[str]:
     """按OID列表优先级依次尝试GETNEXT, 返回首个成功值。"""
     for oid in oid_list:
         val = await snmp_get_next(ip, community, oid, version)
@@ -331,14 +403,15 @@ async def _get_first_value(ip: str, community: str, oid_list: list, version: str
     return None
 
 
-async def _do_walk(ip: str, community: str, oid: str, version: str) -> dict:
+async def _do_walk(ip: str, community, oid: str, version: str) -> dict:
     """在 aclosing 保护下完整消费一次 walk。"""
     out = {}
+    auth, ctx = _creds(community, version)
     gen = walk_cmd(
         await get_engine(),
-        _community(community, version),
+        auth,
         await _target(ip),
-        ContextData(),
+        ctx,
         ObjectType(ObjectIdentity(oid)),
         lexicographicMode=False,
         lookupMib=False,
@@ -355,7 +428,7 @@ async def _do_walk(ip: str, community: str, oid: str, version: str) -> dict:
     return out
 
 
-async def snmp_walk(ip: str, community: str, oid: str, version: str = "2c") -> dict:
+async def snmp_walk(ip: str, community, oid: str, version: str = "2c") -> dict:
     """Walk指定OID子树, 返回 {实例后缀: 值字符串}。
 
     使用官方 walk_cmd 异步生成器(内部循环GETNEXT), lexicographicMode=False
@@ -383,7 +456,7 @@ HR_STORAGE_USED = "1.3.6.1.2.1.25.2.3.1.6"        # hrStorageUsed
 HR_STORAGE_RAM = "1.3.6.1.2.1.25.2.1.2"           # hrStorageRam 枚举值
 
 
-async def _pick_percent(ip: str, community: str, oid_list: list,
+async def _pick_percent(ip: str, community, oid_list: list,
                         version: str, label: str) -> Optional[float]:
     """遍历候选 OID 的整张表, 返回首个存在合理百分比 (0,100] 的表内最大值。
 
@@ -410,7 +483,7 @@ async def _pick_percent(ip: str, community: str, oid_list: list,
     return None
 
 
-async def _hr_processor_load(ip: str, community: str, version: str = "2c") -> Optional[float]:
+async def _hr_processor_load(ip: str, community, version: str = "2c") -> Optional[float]:
     """标准 HOST-RESOURCES CPU 兜底: hrProcessorLoad 取最大值(最忙的核)。"""
     table = await snmp_walk(ip, community, HR_PROCESSOR_LOAD, version)
     vals = []
@@ -424,7 +497,7 @@ async def _hr_processor_load(ip: str, community: str, version: str = "2c") -> Op
     return max(vals) if vals else None
 
 
-async def _hr_storage_ram_percent(ip: str, community: str, version: str = "2c") -> Optional[float]:
+async def _hr_storage_ram_percent(ip: str, community, version: str = "2c") -> Optional[float]:
     """标准 HOST-RESOURCES 内存兜底: hrStorageRam 分区的 已用/总量 百分比。"""
     types = await snmp_walk(ip, community, HR_STORAGE_TYPE, version)
     sizes = await snmp_walk(ip, community, HR_STORAGE_SIZE, version)
@@ -441,7 +514,7 @@ async def _hr_storage_ram_percent(ip: str, community: str, version: str = "2c") 
     return None
 
 
-async def walk_ports(ip: str, community: str, version: str = "2c") -> list:
+async def walk_ports(ip: str, community, version: str = "2c") -> list:
     """采集全部端口明细: 名称/状态/速率/备注(ifAlias)/是否物理口。"""
     descrs = await snmp_walk(ip, community, OID_IF_DESCR, version)
     if not descrs:
@@ -469,7 +542,7 @@ async def walk_ports(ip: str, community: str, version: str = "2c") -> list:
     return ports
 
 
-async def get_port_status(ip: str, community: str, version: str, port_index: int) -> Optional[str]:
+async def get_port_status(ip: str, community, version: str, port_index: int) -> Optional[str]:
     """单端口状态测试: GET ifOperStatus.<index>。"""
     val = await snmp_get(ip, community, f"{OID_IF_OPER}.{port_index}", version)
     if val is None:
@@ -518,7 +591,7 @@ def _empty_result(ip: str) -> dict:
 
 
 async def _collect_network_device_inner(
-    ip: str, community: str, vendor: str, version: str
+    ip: str, community, vendor: str, version: str
 ) -> dict:
     result = _empty_result(ip)
 
@@ -583,7 +656,7 @@ async def _collect_network_device_inner(
 
 
 async def collect_network_device(
-    ip: str, community: str = "public", vendor: str = "", version: str = "2c"
+    ip: str, community = "public", vendor: str = "", version: str = "2c"
 ) -> dict:
     """Collect basic info + CPU/memory + port status from a network device.
 

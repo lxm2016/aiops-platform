@@ -150,6 +150,14 @@ def _migrate_sqlite():
                 ("username", "TEXT DEFAULT ''"),
                 ("password", "TEXT DEFAULT ''"),
                 ("details", "TEXT DEFAULT '{}'"),
+                # 华为 OceanStor 默认关闭 SNMPv1&v2c 开关, 只留 USM 用户,
+                # 所以监控这类存储必须能走 v3
+                ("snmp_v3_user", "TEXT DEFAULT ''"),
+                ("snmp_v3_auth_proto", "TEXT DEFAULT 'sha'"),
+                ("snmp_v3_auth_pass", "TEXT DEFAULT ''"),
+                ("snmp_v3_priv_proto", "TEXT DEFAULT 'aes'"),
+                ("snmp_v3_priv_pass", "TEXT DEFAULT ''"),
+                ("snmp_context", "TEXT DEFAULT ''"),
             ],
         }.items():
             cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,))

@@ -164,7 +164,16 @@ class StorageDevice(Base):
     model = Column(String(128), default="")
     protocol = Column(String(16), default="none")  # none/snmp/smi-s
     snmp_community = Column(String(64), default="public")
-    snmp_version = Column(String(4), default="2c")
+    snmp_version = Column(String(4), default="2c")   # 1 / 2c / 3
+    # --- SNMPv3 (USM) ---
+    # 华为 OceanStor DeviceManager 里「SNMPv1&SNMPv2c协议开关」默认是关闭的,
+    # 只保留 USM 用户, 所以监控它必须走 v3。上下文名称对应设备页面上那一栏。
+    snmp_v3_user = Column(String(64), default="")
+    snmp_v3_auth_proto = Column(String(16), default="sha")   # md5/sha/sha256/...
+    snmp_v3_auth_pass = Column(String(128), default="")
+    snmp_v3_priv_proto = Column(String(16), default="aes")   # des/aes/aes256
+    snmp_v3_priv_pass = Column(String(128), default="")
+    snmp_context = Column(String(64), default="")
     username = Column(String(64), default="")      # SMI-S (WBEM) 账号
     password = Column(String(128), default="")
     capacity_tb = Column(Float, default=0.0)

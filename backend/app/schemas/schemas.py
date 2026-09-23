@@ -174,6 +174,15 @@ class StorageDeviceCreate(BaseModel):
     protocol: str = "none"  # none/snmp/smi-s
     snmp_community: str = "public"
     snmp_version: str = "2c"
+    # --- SNMPv3 (USM) ---
+    # 华为 OceanStor 的「SNMPv1&SNMPv2c协议开关」默认关闭, 只留 USM 用户;
+    # 这类设备必须用 v3, 上下文名称填 DeviceManager 上「上下文名称」那一栏的值。
+    snmp_v3_user: str = ""
+    snmp_v3_auth_proto: str = "sha"
+    snmp_v3_auth_pass: str = ""
+    snmp_v3_priv_proto: str = "aes"
+    snmp_v3_priv_pass: str = ""
+    snmp_context: str = ""
     username: str = ""
     password: str = ""
     capacity_tb: float = 0.0
@@ -188,6 +197,12 @@ class StorageDeviceOut(BaseModel):
     protocol: str
     snmp_community: str
     snmp_version: str
+    snmp_v3_user: str = ""
+    snmp_v3_auth_proto: str = "sha"
+    snmp_v3_auth_pass: str = ""
+    snmp_v3_priv_proto: str = "aes"
+    snmp_v3_priv_pass: str = ""
+    snmp_context: str = ""
     username: str
     password: str
     capacity_tb: float

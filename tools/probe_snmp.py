@@ -33,12 +33,56 @@ try:
     from pysnmp.hlapi.v3arch.asyncio import (
         SnmpEngine, CommunityData, UdpTransportTarget,
         ContextData, ObjectType, ObjectIdentity, get_cmd, walk_cmd,
+        UsmUserData, usmHMACMD5AuthProtocol, usmHMACSHAAuthProtocol,
+        usmDESPrivProtocol, usmAesCfb128Protocol,
     )
 except Exception as e:  # noqa: BLE001
     print(f"[错误] 无法导入 pysnmp: {e}")
     print("请用后端虚拟环境的解释器运行, 例如:")
     print("  /opt/aiops-deploy/backend/venv/bin/python probe_snmp.py --ip <交换机IP>")
     sys.exit(1)
+
+AUTH_PROTOCOLS = {"md5": usmHMACMD5AuthProtocol, "sha": usmHMACSHAAuthProtocol,
+                  "sha1": usmHMACSHAAuthProtocol}
+PRIV_PROTOCOLS = {"des": usmDESPrivProtocol, "aes": usmAesCfb128Protocol,
+                  "aes128": usmAesCfb128Protocol}
+
+# ---------------------------------------------------------------------------
+# 华为 OceanStor 私有 MIB (企业号 34774) —— 存储探测用
+# ---------------------------------------------------------------------------
+# 关键: 华为存储**不暴露标准 hrStorage**, 只答自己的私有 MIB。只 walk hrStorage
+# 会一无所获, 这就是"平台采不到华为存储容量"的根本原因。
+# OID 取自 Zabbix 官方模板 huawei_5300v5_snmp / huawei_dorado_snmp。
+HW = "1.3.6.1.4.1.34774.4.1"
+OID_HW_STORAGE = [
+    ("HW 系统运行状态      ", f"{HW}.1.3.0"),
+    ("HW 已用容量(单位MB)  ", f"{HW}.1.4.0"),
+    ("HW 总容量  (单位MB)  ", f"{HW}.1.5.0"),
+    ("HW 设备版本          ", f"{HW}.1.6.0"),
+    ("HW 存储池名称        ", f"{HW}.23.4.2.1.2"),
+    ("HW 存储池健康状态    ", f"{HW}.23.4.2.1.5"),
+    ("HW 存储池运行状态    ", f"{HW}.23.4.2.1.6"),
+    ("HW 存储池总容量(MB)  ", f"{HW}.23.4.2.1.7"),
+    ("HW 存储池已用(MB)    ", f"{HW}.23.4.2.1.8"),
+    ("HW 存储池可用(MB)    ", f"{HW}.23.4.2.1.9"),
+    ("HW 控制器 ID         ", f"{HW}.23.5.2.1.1"),
+    ("HW 控制器健康        ", f"{HW}.23.5.2.1.2"),
+    ("HW 控制器运行        ", f"{HW}.23.5.2.1.3"),
+    ("HW 控制器角色        ", f"{HW}.23.5.2.1.6"),
+    ("HW 控制器 CPU%       ", f"{HW}.23.5.2.1.8"),
+    ("HW 控制器 内存%      ", f"{HW}.23.5.2.1.9"),
+    ("HW 硬盘 位置         ", f"{HW}.23.5.1.1.4"),
+    ("HW 硬盘 型号         ", f"{HW}.23.5.1.1.12"),
+    ("HW 硬盘 健康         ", f"{HW}.23.5.1.1.2"),
+    ("HW 硬盘 运行         ", f"{HW}.23.5.1.1.3"),
+    ("HW 硬盘 温度℃        ", f"{HW}.23.5.1.1.11"),
+    ("HW 硬盘 健康分       ", f"{HW}.23.5.1.1.25"),
+    ("HW LUN 名称          ", f"{HW}.19.9.4.1.2"),
+    ("HW LUN 容量(KB)      ", f"{HW}.19.9.4.1.5"),
+    ("HW LUN 状态          ", f"{HW}.19.9.4.1.11"),
+    ("HW 风扇 健康         ", f"{HW}.23.5.4.1.3"),
+    ("HW 电源 健康         ", f"{HW}.23.5.5.1.3"),
+]
 
 # (标签, OID) —— 覆盖华三/华为/思科/标准, 便于一次性比对
 CANDIDATES = [
@@ -64,10 +108,30 @@ def _mp(version):
     return 1 if version == "2c" else 0
 
 
-async def _get(engine, target, community, oid, version):
+def _build_auth(args):
+    """按命令行参数构造 SNMP 凭据 (v1/v2c 返回团体名, v3 返回 USM 参数)。"""
+    if args.v3:
+        return UsmUserData(
+            args.user,
+            **({"authKey": args.auth_pass,
+                "authProtocol": AUTH_PROTOCOLS.get(args.auth_proto, usmHMACSHAAuthProtocol)}
+               if args.auth_pass else {}),
+            **({"privKey": args.priv_pass,
+                "privProtocol": PRIV_PROTOCOLS.get(args.priv_proto, usmAesCfb128Protocol)}
+               if args.priv_pass else {}),
+        )
+    return CommunityData(args.community, mpModel=_mp(args.version))
+
+
+def _build_ctx(args):
+    # ContextData 第一个位置参数是 contextEngineId, 不是 contextName, 必须写关键字
+    return ContextData(contextName=args.context or "") if args.v3 else ContextData()
+
+
+async def _get(engine, target, auth, ctx, oid):
     try:
         err_ind, err_stat, _idx, vbs = await get_cmd(
-            engine, community, target, ContextData(),
+            engine, auth, target, ctx,
             ObjectType(ObjectIdentity(oid)), lookupMib=False)
         if err_ind or err_stat:
             return None
@@ -76,11 +140,11 @@ async def _get(engine, target, community, oid, version):
         return None
 
 
-async def _walk(engine, target, community, oid, version):
+async def _walk(engine, target, auth, ctx, oid):
     """返回 [(实例后缀, 值字符串)]。"""
     out = []
     try:
-        gen = walk_cmd(engine, community, target, ContextData(),
+        gen = walk_cmd(engine, auth, target, ctx,
                        ObjectType(ObjectIdentity(oid)),
                        lexicographicMode=False, lookupMib=False)
         async for (err_ind, err_stat, _idx, vbs) in gen:
@@ -95,16 +159,78 @@ async def _walk(engine, target, community, oid, version):
     return out
 
 
+async def scan_storage(engine, target, auth, ctx):
+    """存储专用: 先探华为私有 MIB, 再探标准 hrStorage, 顺带验证 SNMPv3。"""
+    print("\n" + "=" * 78)
+    print(" 存储探测 (华为 OceanStor 私有 MIB / 标准 hrStorage 对照)")
+    print("=" * 78)
+    hub_ok = 0
+    for label, oid in OID_HW_STORAGE:
+        rows = await _walk(engine, target, auth, ctx, oid)
+        if rows and rows[0][0] == "__error__":
+            print(f"{label} {oid}\n    出错: {rows[0][1]}")
+            continue
+        if not rows:
+            print(f"{label} {oid}\n    (无数据)")
+            continue
+        hub_ok += 1
+        shown = rows[:8]
+        for sfx, val in shown:
+            print(f"{label} {oid}\n    实例 {sfx:<10} = {val}")
+        if len(rows) > len(shown):
+            print(f"    ... 共 {len(rows)} 个实例(只印前 8 条)")
+
+    if hub_ok:
+        print(f"\n[结论] 华为私有 MIB 有 {hub_ok} 张表/标量有数据 —— "
+              f"这是台华为 OceanStor, 平台会自动走私有 MIB 采集。")
+        print("       容量字段单位是 MB, 已用/总量相除即使用率; LUN 容量单位是 KB。")
+    else:
+        print("\n[结论] 华为私有 MIB 无数据。要么不是华为存储, 要么 SNMP 凭据/版本不对,")
+        print("       要么上下文名称(context)没填对 —— 华为 DeviceManager 上那一栏要与这里一致。")
+
+    print("\n--- 标准 HOST-RESOURCES-MIB (通用存储) ---")
+    for label, oid in (("hrStorageType ", "1.3.6.1.2.1.25.2.3.1.2"),
+                       ("hrStorageDescr", "1.3.6.1.2.1.25.2.3.1.3"),
+                       ("hrStorageSize ", "1.3.6.1.2.1.25.2.3.1.5"),
+                       ("hrStorageUsed ", "1.3.6.1.2.1.25.2.3.1.6")):
+        rows = await _walk(engine, target, auth, ctx, oid)
+        if not rows:
+            print(f"{label} {oid}\n    (无数据 —— 华为存储不暴露这个表, 属正常)")
+            continue
+        print(f"{label} {oid}\n    共 {len(rows)} 个实例, 前 5 条:")
+        for sfx, val in rows[:5]:
+            print(f"      实例 {sfx:<10} = {val}")
+
+
 async def main_async(args):
     engine = SnmpEngine()
     target = await UdpTransportTarget.create(
         (args.ip, args.port), timeout=args.timeout, retries=1)
-    community = CommunityData(args.community, mpModel=_mp(args.version))
+    auth = _build_auth(args)
+    ctx = _build_ctx(args)
 
-    name = await _get(engine, target, community, OID_SYS_NAME, args.version)
-    descr = await _get(engine, target, community, OID_SYS_DESCR, args.version)
+    if args.v3:
+        print(f"SNMPv3(USM): 用户={args.user!r} 认证={args.auth_proto} "
+              f"{'(已设密码)' if args.auth_pass else '(无)'} "
+              f"加密={args.priv_proto if args.priv_pass else '无'} "
+              f"上下文={args.context!r}")
+    else:
+        print(f"SNMP {args.version}: community={args.community!r}")
+
+    if args.storage:
+        await scan_storage(engine, target, auth, ctx)
+        return 0
+
+    name = await _get(engine, target, auth, ctx, OID_SYS_NAME)
+    descr = await _get(engine, target, auth, ctx, OID_SYS_DESCR)
     if name is None and descr is None:
-        print(f"[错误] {args.ip} 无 SNMP 响应 (团体名/版本/网络?). 团体名试: public / <你的只读团体名>")
+        print(f"[错误] {args.ip} 无 SNMP 响应。逐项排查:")
+        print("  1) v1/v2c: 团体名对不对(public/<自定>); 端口是不是 161")
+        print("  2) v3: 用户名/认证算法/认证密码/加密算法/加密密码 五项必须与设备侧完全一致")
+        print("     —— 认证算法和加密算法不匹配是最常见的失败原因(如设备是 SHA, 这里写了 MD5)")
+        print("  3) 华为 OceanStor: DeviceManager 里「SNMPv1&SNMPv2c协议开关」若是关闭,")
+        print("     必须用 --v3; 且「上下文名称」那一栏要与 --context 填的一致")
+        print("  4) 网络: 本机到存储 161/udp 是否放通; 存储侧是否配了 SNMP 访问白名单/ACL")
         return 1
     print("=" * 78)
     print(f" 目标 {args.ip}   sysName={name}")
@@ -113,7 +239,7 @@ async def main_async(args):
 
     ram_idx = None
     for label, oid in CANDIDATES:
-        rows = await _walk(engine, target, community, oid, args.version)
+        rows = await _walk(engine, target, auth, ctx, oid)
         print(f"\n{label}  {oid}")
         if not rows:
             print("    (无数据 / 不支持)")
@@ -153,8 +279,8 @@ async def main_async(args):
                     print(f"    -> RAM 分区索引 = {suffix}(hrStorageRam)")
 
     if ram_idx is not None:
-        sz = dict(await _walk(engine, target, community, "1.3.6.1.2.1.25.2.3.1.5", args.version))
-        us = dict(await _walk(engine, target, community, "1.3.6.1.2.1.25.2.3.1.6", args.version))
+        sz = dict(await _walk(engine, target, auth, ctx, "1.3.6.1.2.1.25.2.3.1.5"))
+        us = dict(await _walk(engine, target, auth, ctx, "1.3.6.1.2.1.25.2.3.1.6"))
         try:
             s, u = float(sz[ram_idx]), float(us[ram_idx])
             if s > 0:
@@ -170,13 +296,31 @@ async def main_async(args):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="SNMP CPU/内存 OID 诊断")
-    ap.add_argument("--ip", required=True, help="交换机 IP")
+    ap = argparse.ArgumentParser(description="SNMP OID 诊断 (交换机 CPU/内存 + 存储)")
+    ap.add_argument("--ip", required=True, help="设备 IP")
     ap.add_argument("--community", default="public", help="只读团体名, 默认 public")
     ap.add_argument("--version", default="2c", choices=["2c", "1"], help="SNMP 版本")
+    # ---- SNMPv3 (USM) ----
+    ap.add_argument("--v3", action="store_true",
+                    help="用 SNMPv3。华为 OceanStor 的「SNMPv1&v2c协议开关」"
+                         "默认关闭时只能走这条")
+    ap.add_argument("--user", default="", help="v3 USM 用户名")
+    ap.add_argument("--auth-proto", default="sha", choices=["sha", "md5"],
+                    help="v3 认证算法, 必须与设备侧一致")
+    ap.add_argument("--auth-pass", default="", help="v3 认证密码")
+    ap.add_argument("--priv-proto", default="aes", choices=["aes", "des"],
+                    help="v3 加密算法, 必须与设备侧一致")
+    ap.add_argument("--priv-pass", default="", help="v3 加密密码")
+    ap.add_argument("--context", default="",
+                    help="v3 上下文名称(对应设备页面上那一栏), 不确定留空")
+    # ---- 模式 ----
+    ap.add_argument("--storage", action="store_true",
+                    help="存储模式: 探华为 OceanStor 私有 MIB + 标准 hrStorage")
     ap.add_argument("--port", type=int, default=161)
     ap.add_argument("--timeout", type=float, default=3.0)
     args = ap.parse_args()
+    if args.v3 and not args.user:
+        ap.error("--v3 必须同时给 --user")
     sys.exit(asyncio.run(main_async(args)))
 
 

@@ -236,12 +236,22 @@ async def poll_all_storage():
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(StorageDevice))
         devices = result.scalars().all()
-        device_list = [
-            {"id": d.id, "ip": d.ip, "name": d.name, "protocol": d.protocol,
-             "community": d.snmp_community, "version": d.snmp_version,
-             "username": d.username, "password": d.password}
-            for d in devices
-        ]
+        device_list = []
+        for d in devices:
+            # v3 时凭据是 USM 参数字典(华为 OceanStor 默认关闭 v1/v2c 开关)
+            if (d.snmp_version or "").strip() == "3":
+                cred = {"user": d.snmp_v3_user or "",
+                        "auth_proto": d.snmp_v3_auth_proto or "sha",
+                        "auth_pass": d.snmp_v3_auth_pass or "",
+                        "priv_proto": d.snmp_v3_priv_proto or "aes",
+                        "priv_pass": d.snmp_v3_priv_pass or "",
+                        "context": d.snmp_context or ""}
+            else:
+                cred = d.snmp_community
+            device_list.append(
+                {"id": d.id, "ip": d.ip, "name": d.name, "protocol": d.protocol,
+                 "community": cred, "version": d.snmp_version,
+                 "username": d.username, "password": d.password})
 
     for dev in device_list:
         if dev["protocol"] not in ("snmp", "smi-s"):
