@@ -41,7 +41,10 @@ HW_VERSION = f"{HW_BASE}.1.6.0"        # 设备版本
 # .8 实测是**已分配(thin 供给)容量**, 不是已用 —— 见 _pool_capacity() 的注释
 HW_POOL = f"{HW_BASE}.23.4.2.1"        # 存储池: .2名称 .5健康 .6运行 .7总 .8已分配 .9可用
 HW_CTRL = f"{HW_BASE}.23.5.2.1"        # 控制器: .1ID .2健康 .3运行 .6角色 .8CPU% .9内存%
-HW_DISK = f"{HW_BASE}.23.5.1.1"        # 硬盘:   .1ID .2健康 .3运行 .4位置 .11温度 .12型号 .25健康分
+# 硬盘: .1ID .2健康 .3运行 .4位置 .5类型 .6容量 .7角色 .8转速 .10扇区
+#       .11温度 .12型号 .13固件 .14厂商 .15序列号 .18硬盘域 .21运行天数 .24容量使用率% .25健康分
+# 列号取自 HUAWEI-STORAGE-HARDWARE-MIB 的 hwInfoDiskEntry
+HW_DISK = f"{HW_BASE}.23.5.1.1"
 HW_FAN = f"{HW_BASE}.23.5.4.1"         # 风扇:   .1ID .2位置 .3健康 .4运行
 HW_BBU = f"{HW_BASE}.23.5.5.1"         # 电源/BBU: .1ID .2位置 .3健康 .4运行
 HW_LUN = f"{HW_BASE}.19.9.4.1"         # LUN:    .2名称 .5容量(KB) .11状态
@@ -97,6 +100,32 @@ def _pick_unit(raw: int, target_bytes: float) -> int:
         if best_err is None or err < best_err:
             best, best_err = mult, err
     return best
+
+
+def _pick_cap_unit(values, reference_bytes: float, lo: float = 0.5, hi: float = 3.0):
+    """给一批**单位未知**的容量值挑单位, 返回 (倍数, 名称, Σ/参考 比值)。
+
+    硬盘表的 hwInfoDiskCapacity 是 counter64, 但 MIB 里没写单位 —— 可能是 B/KB/MB,
+    也可能按"扇区数×512"给。单看一个盘值会出现多个单位都"像"的情况(KB 与扇区只差 2 倍),
+    所以拿"Σ全部硬盘容量"与**存储池总容量**做交叉校验:
+    同一阵列里 Σ硬盘(裸容量)必然比池可用容量大(RAID 开销)但不会大太多,
+    落在池容量的 0.5~3 倍之间的那个单位才是真的。
+    """
+    if not values or reference_bytes <= 0:
+        return _MB, "", 0.0
+    total = sum(v for v in values if v and v > 0)
+    if total <= 0:
+        return _MB, "", 0.0
+    best = None
+    for label, mult in (("B", 1), ("KB", _KB), ("MB", _MB), ("扇区512B", 512)):
+        ratio = total * mult / reference_bytes
+        if lo <= ratio <= hi:
+            score = abs(ratio - 1.5)      # 典型 RAID 开销约 1.3~1.5 倍
+            if best is None or score < best[0]:
+                best = (score, mult, label, ratio)
+    if best is None:
+        return _MB, "", 0.0
+    return best[1], best[2], best[3]
 
 
 def _pool_capacity(total_mb: int, alloc_raw: int, free_mb: int, alloc_unit: int):
@@ -257,33 +286,86 @@ async def collect_huawei_snmp(ip: str, community, version: str = "2c") -> dict:
     # ---- 硬盘 ----
     disk_ids = probe["disks"] or {}
     if disk_ids:
-        d_model = await snmp_walk(ip, community, f"{HW_DISK}.12", version)
+        # 明细列一次取齐 —— 这些列都很小, 12 块盘只多花一次 walk 的时间
         d_loc = await snmp_walk(ip, community, f"{HW_DISK}.4", version)
+        d_cap = await snmp_walk(ip, community, f"{HW_DISK}.6", version)
+        d_speed = await snmp_walk(ip, community, f"{HW_DISK}.8", version)
+        d_sector = await snmp_walk(ip, community, f"{HW_DISK}.10", version)
+        d_temp = await snmp_walk(ip, community, f"{HW_DISK}.11", version)
+        d_model = await snmp_walk(ip, community, f"{HW_DISK}.12", version)
+        d_fw = await snmp_walk(ip, community, f"{HW_DISK}.13", version)
+        d_vendor = await snmp_walk(ip, community, f"{HW_DISK}.14", version)
+        d_sn = await snmp_walk(ip, community, f"{HW_DISK}.15", version)
+        d_domain = await snmp_walk(ip, community, f"{HW_DISK}.18", version)
+        d_runtime = await snmp_walk(ip, community, f"{HW_DISK}.21", version)
+        d_usage = await snmp_walk(ip, community, f"{HW_DISK}.24", version)
         d_health = await snmp_walk(ip, community, f"{HW_DISK}.2", version)
         d_run = await snmp_walk(ip, community, f"{HW_DISK}.3", version)
-        d_temp = await snmp_walk(ip, community, f"{HW_DISK}.11", version)
         d_score = await snmp_walk(ip, community, f"{HW_DISK}.25", version)
+
+        # 容量单位交叉校验: 用 Σ硬盘(裸) vs 存储池总容量 反推单位
+        cap_vals = [_safe_int(v) or 0 for v in d_cap.values()]
+        cap_unit, cap_label, cap_ratio = _pick_cap_unit(
+            cap_vals, result["capacity_tb"] * (1024 ** 4))
+        disk_total_b = 0
         for sfx, did in disk_ids.items():
+            model = str(d_model.get(sfx) or "")
+            size_b = (_safe_int(d_cap.get(sfx)) or 0) * cap_unit
+            usage = _safe_int(d_usage.get(sfx))
+            # .24 是百分比; 越界说明该型号口径不同, 宁可留空也别报错数
+            used_pct = usage if (usage is not None and 0 <= usage <= 100) else None
+            used_b = size_b * used_pct / 100 if (size_b and used_pct) else 0
+            disk_total_b += size_b
             result["details"]["disks"].append({
-                "name": f"{d_loc.get(sfx) or did} {d_model.get(sfx) or ''}".strip(),
+                "name": f"{d_loc.get(sfx) or did} {model}".strip(),
+                "location": d_loc.get(sfx) or str(did or sfx),
+                "model": model or None,
+                "vendor": d_vendor.get(sfx) or None,
+                "serial": d_sn.get(sfx) or None,
+                "firmware": d_fw.get(sfx) or None,
+                "disk_type": ("SSD" if "SSD" in model.upper()
+                              else ("HDD" if model else None)),
+                "disk_domain": d_domain.get(sfx) or None,
+                "speed": _safe_int(d_speed.get(sfx)) or None,
+                "sector_size": _safe_int(d_sector.get(sfx)) or None,
+                "run_days": _safe_int(d_runtime.get(sfx)),
+                "temperature": _safe_int(d_temp.get(sfx)),
                 "health": _hw_status(HW_HEALTH, d_health.get(sfx)),
                 "running": _hw_status(HW_RUNNING, d_run.get(sfx)),
-                "temperature": _safe_int(d_temp.get(sfx)),
                 # 255 = 该盘未上报/不支持健康分, 不能当百分比展示
                 "health_score": _hw_health_score(d_score.get(sfx)),
+                "size_tb": round(size_b / (1024 ** 4), 3) if size_b else None,
+                "used_tb": round(used_b / (1024 ** 4), 3) if used_b else None,
+                "used_percent": used_pct,
             })
+        if disk_total_b:
+            result["details"]["disk_raw_total_tb"] = round(disk_total_b / (1024 ** 4), 2)
+            result["details"]["disk_cap_unit"] = cap_label or "未判定"
+            result["details"]["disk_cap_ratio"] = round(cap_ratio, 2)
 
     # ---- LUN ----
     lun_names = probe["luns"] or {}
     if lun_names:
         l_cap = lun_cap_raw
         l_st = await snmp_walk(ip, community, f"{HW_LUN}.11", version)
+        l_wwn = await snmp_walk(ip, community, f"{HW_LUN}.3", version)
+        l_pool = await snmp_walk(ip, community, f"{HW_LUN}.4", version)
         for sfx, nm in lun_names.items():
             cap_b = (_safe_int(l_cap.get(sfx)) or 0) * _KB
+            st = _hw_status(HW_RUNNING, l_st.get(sfx))
             result["details"]["volumes"].append({
                 "name": str(nm or f"LUN{sfx}"),
+                # 容量即"分配容量"(LUN 的配置容量)
                 "size_tb": round(cap_b / (1024 ** 4), 3),
-                "status": _hw_status(HW_RUNNING, l_st.get(sfx)),
+                "alloc_tb": round(cap_b / (1024 ** 4), 3),
+                # 已用量: 华为 SNMP MIB 的 LUN 表未提供该列(Zabbix 官方模板同样只取容量/状态),
+                # 用 --sniff-lun 确认真实列号前一律留空, 绝不拿分配容量冒充已用
+                "used_tb": None,
+                "used_percent": None,
+                "wwn": l_wwn.get(sfx) or None,
+                "pool_id": l_pool.get(sfx) or None,
+                "status": st,       # 兼容老前端
+                "running": st,
             })
 
     # ---- 风扇 / 电源 / 机框 (只取数量与异常项, 避免明细过大) ----

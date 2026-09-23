@@ -81,9 +81,8 @@ HW_POOL_TOTAL = f"{HW}.23.4.2.1.7"
 HW_POOL_ALLOC = f"{HW}.23.4.2.1.8"
 HW_POOL_FREE = f"{HW}.23.4.2.1.9"
 HW_LUN_CAP = f"{HW}.19.9.4.1.5"
-# 标准 MIB 的 sysDescr: 华为存储很多型号不答私有 .1.6.0(设备版本),
-# 但 sysDescr 一定会答 —— 拿它确认型号最稳(如 "OceanStor Dorado 5600 V6")
-OID_SYS_DESCR = "1.3.6.1.2.1.1.1.0"
+# LUN 表(索引 hwStorageLunID): .2名称 .3WWN .4池ID .5容量(KB) .11状态
+HW_LUN_TABLE = f"{HW}.19.9.4.1"
 OID_HW_STORAGE = [
     ("HW 系统运行状态      ", f"{HW}.1.3.0"),
     ("HW 已用容量(单位MB)  ", f"{HW}.1.4.0"),
@@ -262,19 +261,61 @@ def _warn_capacity_gap(total_rows, alloc_rows, free_rows, lun_rows):
                   f"此池未超配")
 
 
+async def dump_table(engine, target, auth, ctx, table_oid, max_col=40, label=""):
+    """把一张表**每一列**都走一遍, 报出哪列有数据。
+
+    为什么需要它: 华为 MIB 只给列号不给中文名, 而"某张表有没有某个字段"光靠
+    文档和厂商模板都靠不住 —— 挨列走一遍是唯一能拿到确凿答案的办法。
+    输出里会标出"像容量"的列(数值大且随实例变化), 便于定位 LUN 的已用容量。
+    """
+    print("\n" + "=" * 78)
+    print(f" 整表列扫描 {label or table_oid}")
+    print(f" 表 OID = {table_oid}   逐列走 .1 ~ .{max_col}")
+    print("=" * 78)
+    hits = []
+    for col in range(1, max_col + 1):
+        oid = f"{table_oid}.{col}"
+        rows = await _walk(engine, target, auth, ctx, oid)
+        if rows and rows[0][0] == "__error__":
+            continue
+        if not rows:
+            continue
+        vals = [v for _, v in rows]
+        nums = []
+        for v in vals:
+            try:
+                nums.append(int(str(v).strip()))
+            except (TypeError, ValueError):
+                nums = []
+                break
+        # 数值列且量级大 -> 很可能是容量
+        hint = ""
+        if nums:
+            mx = max(nums)
+            if mx >= 10 ** 7:
+                hint = "  <== 数值很大, 像容量(B/KB/扇区口径需再判)"
+            elif mx <= 100:
+                hint = "  <== 0~100, 像百分比/状态码"
+        else:
+            hint = "  <== 文本"
+        hits.append((col, len(rows), vals[:3], hint))
+
+    if not hits:
+        print(" 该表无任何列有数据(可能表不存在, 或凭据/上下文不对)")
+        return
+
+    # 索引列(实例数最多的那一列)先亮出来, 方便对照设备界面
+    for col, n, sample, hint in hits:
+        shown = ", ".join(str(s)[:28] for s in sample)
+        print(f"  列 .{col:<3} 实例 {n:<4} 前几个值: {shown}{hint}")
+    print(f"\n  共 {len(hits)} 列有数据。把本段整体贴回来即可定死每个列号的含义。")
+
+
 async def scan_storage(engine, target, auth, ctx):
     """存储专用: 先探华为私有 MIB, 再探标准 hrStorage, 顺带验证 SNMPv3。"""
     print("\n" + "=" * 78)
     print(" 存储探测 (华为 OceanStor 私有 MIB / 标准 hrStorage 对照)")
     print("=" * 78)
-
-    # 先报型号: 私有 .1.6.0 很多型号不答, sysDescr 一定答
-    desc = await _get(engine, target, auth, ctx, OID_SYS_DESCR)
-    if desc:
-        first = str(desc).strip().splitlines()[0][:110]
-        print(f"设备自述(sysDescr): {first}\n")
-    else:
-        print("设备自述(sysDescr): (无数据) —— 若整轮都无数据, 先查凭据/网络\n")
 
     hub_ok = 0
     grabbed = {}
@@ -338,6 +379,17 @@ async def main_async(args):
     else:
         print(f"SNMP {args.version}: community={args.community!r}")
 
+    # 型号先报出来: 私有 .1.6.0 很多型号不答, sysDescr 一定答
+    desc = await _get(engine, target, auth, ctx, OID_SYS_DESCR)
+    if desc:
+        print(f"设备自述(sysDescr): {str(desc).strip().splitlines()[0][:110]}")
+
+    if args.sniff_lun:
+        await dump_table(engine, target, auth, ctx, HW_LUN_TABLE, label="华为 LUN 表")
+        return 0
+    if args.dump_table:
+        await dump_table(engine, target, auth, ctx, args.dump_table)
+        return 0
     if args.storage:
         await scan_storage(engine, target, auth, ctx)
         return 0
@@ -439,6 +491,11 @@ def main():
     # ---- 模式 ----
     ap.add_argument("--storage", action="store_true",
                     help="存储模式: 探华为 OceanStor 私有 MIB + 标准 hrStorage")
+    ap.add_argument("--dump-table", dest="dump_table", default="",
+                    help="整表列扫描: 把该 OID 下每一列都走一遍(如 LUN 表 "
+                         "1.3.6.1.4.1.34774.4.1.19.9.4.1), 用来确认真实列号")
+    ap.add_argument("--sniff-lun", action="store_true",
+                    help="快捷方式: 扫描华为 LUN 表全部列, 找'已用容量'在哪一列")
     ap.add_argument("--port", type=int, default=161)
     ap.add_argument("--timeout", type=float, default=3.0)
     args = ap.parse_args()

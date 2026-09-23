@@ -174,44 +174,112 @@
         <el-tabs v-model="detailTab">
           <el-tab-pane label="存储池" name="pools">
             <el-table :data="detail.pools" size="small" border empty-text="暂无数据 (协议不支持或未采集)">
-              <el-table-column prop="name" label="名称" min-width="160" show-overflow-tooltip />
-              <el-table-column prop="size_tb" label="总容量(TB)" width="110" />
-              <el-table-column prop="used_tb" label="已用(TB)" width="100" />
-              <el-table-column label="使用率" width="140">
+              <el-table-column prop="name" label="名称" min-width="150" show-overflow-tooltip />
+              <el-table-column prop="size_tb" label="总容量(TB)" width="105" />
+              <el-table-column prop="used_tb" label="已用(TB)" width="95" />
+              <el-table-column prop="free_tb" label="可用(TB)" width="95" />
+              <el-table-column label="使用率" width="150">
                 <template #default="{ row }">
-                  <el-progress :percentage="Math.min(100, row.used_percent || 0)" :stroke-width="8" :color="percentColor(row.used_percent || 0)" />
+                  <el-progress :percentage="Math.min(100, row.used_percent || 0)"
+                               :stroke-width="8"
+                               :color="stPercentColor(row.used_percent)" />
+                </template>
+              </el-table-column>
+              <el-table-column label="已分配(TB)" width="110">
+                <template #default="{ row }">
+                  <el-tooltip v-if="row.alloc_tb" placement="top" effect="dark"
+                              :content="`订阅(thin 供给)容量 ${row.alloc_tb} TB, 可大于物理总容量 —— 属精简配置, 不是故障`">
+                    <span style="color: var(--warning, #ffb020); cursor: help">
+                      {{ row.alloc_tb }}
+                    </span>
+                  </el-tooltip>
+                  <span v-else style="color: var(--text-sub)">-</span>
+                </template>
+              </el-table-column>
+              <el-table-column prop="running" label="状态" width="90">
+                <template #default="{ row }">
+                  <el-tag :type="isOk(row) ? 'success' : 'danger'" size="small" effect="dark">
+                    {{ rowStatus(row) || '-' }}
+                  </el-tag>
                 </template>
               </el-table-column>
             </el-table>
           </el-tab-pane>
           <el-tab-pane :label="`磁盘 (${detail.disks.length})`" name="disks">
-            <el-table :data="detail.disks" size="small" border empty-text="暂无数据 (协议不支持或未采集)">
-              <el-table-column prop="name" label="磁盘" min-width="200" show-overflow-tooltip />
-              <el-table-column prop="size_tb" label="容量(TB)" width="110" />
-              <el-table-column prop="used_tb" label="已用(TB)" width="100" />
-              <el-table-column label="使用率" width="140">
+            <div style="font-size: 12px; color: var(--text-sub); margin-bottom: 6px">
+              <el-icon style="vertical-align: -2px"><Pointer /></el-icon>
+              点击任意一行查看该硬盘的完整信息
+            </div>
+            <el-table :data="detail.disks" size="small" border
+                      empty-text="暂无数据 (协议不支持或未采集)"
+                      @row-click="openDiskDetail"
+                      :row-style="{ cursor: 'pointer' }">
+              <el-table-column prop="location" label="槽位" width="90" />
+              <el-table-column prop="model" label="型号" min-width="150" show-overflow-tooltip />
+              <el-table-column prop="disk_type" label="类型" width="70" />
+              <el-table-column prop="size_tb" label="容量(TB)" width="100">
                 <template #default="{ row }">
-                  <el-progress v-if="row.used_percent != null" :percentage="Math.min(100, row.used_percent || 0)" :stroke-width="8" :color="percentColor(row.used_percent || 0)" />
+                  <span v-if="row.size_tb != null">{{ row.size_tb }}</span>
                   <span v-else style="color: var(--text-sub)">-</span>
                 </template>
               </el-table-column>
-              <el-table-column prop="status" label="状态" width="110">
+              <el-table-column prop="used_tb" label="已用(TB)" width="95">
                 <template #default="{ row }">
-                  <el-tag v-if="row.status" :type="row.status === '正常' ? 'success' : 'danger'" size="small" effect="dark">
-                    {{ row.status }}
-                  </el-tag>
+                  <span v-if="row.used_tb != null">{{ row.used_tb }}</span>
                   <span v-else style="color: var(--text-sub)">-</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="使用率" width="140">
+                <template #default="{ row }">
+                  <el-progress v-if="row.used_percent != null"
+                               :percentage="Math.min(100, row.used_percent)"
+                               :stroke-width="8"
+                               :color="stPercentColor(row.used_percent)" />
+                  <span v-else style="color: var(--text-sub)">-</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="温度" width="80">
+                <template #default="{ row }">
+                  <span :style="{ color: row.temperature >= 50 ? '#ff4d5e' : 'inherit' }">
+                    {{ row.temperature != null ? row.temperature + '℃' : '-' }}
+                  </span>
+                </template>
+              </el-table-column>
+              <el-table-column label="状态" width="90">
+                <template #default="{ row }">
+                  <el-tag :type="isOk(row) ? 'success' : 'danger'" size="small" effect="dark">
+                    {{ rowStatus(row) || '-' }}
+                  </el-tag>
                 </template>
               </el-table-column>
             </el-table>
           </el-tab-pane>
           <el-tab-pane :label="`控制器 (${detail.controllers.length})`" name="controllers">
             <el-table :data="detail.controllers" size="small" border empty-text="暂无数据 (协议不支持或未采集)">
-              <el-table-column prop="name" label="控制器" min-width="240" show-overflow-tooltip />
-              <el-table-column prop="status" label="状态" width="140">
+              <el-table-column prop="name" label="控制器" min-width="140" show-overflow-tooltip />
+              <el-table-column prop="role" label="角色" width="80">
                 <template #default="{ row }">
-                  <el-tag :type="row.status === '正常' ? 'success' : 'danger'" size="small" effect="dark">
-                    {{ row.status }}
+                  <el-tag size="small" effect="plain">{{ row.role || '-' }}</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="CPU" width="140">
+                <template #default="{ row }">
+                  <el-progress v-if="row.cpu != null" :percentage="Math.min(100, row.cpu)"
+                               :stroke-width="8" :color="percentColor(row.cpu)" />
+                  <span v-else style="color: var(--text-sub)">-</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="内存" width="140">
+                <template #default="{ row }">
+                  <el-progress v-if="row.memory != null" :percentage="Math.min(100, row.memory)"
+                               :stroke-width="8" :color="percentColor(row.memory)" />
+                  <span v-else style="color: var(--text-sub)">-</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="状态" width="90">
+                <template #default="{ row }">
+                  <el-tag :type="isOk(row) ? 'success' : 'danger'" size="small" effect="dark">
+                    {{ rowStatus(row) || '-' }}
                   </el-tag>
                 </template>
               </el-table-column>
@@ -219,12 +287,91 @@
           </el-tab-pane>
           <el-tab-pane :label="`卷/LUN (${detail.volumes.length})`" name="volumes">
             <el-table :data="detail.volumes" size="small" border empty-text="暂无数据 (协议不支持或未采集)">
-              <el-table-column prop="name" label="卷" min-width="240" show-overflow-tooltip />
-              <el-table-column prop="size_tb" label="容量(TB)" width="120" />
+              <el-table-column prop="name" label="卷" min-width="200" show-overflow-tooltip />
+              <el-table-column prop="alloc_tb" label="分配容量(TB)" width="120">
+                <template #default="{ row }">
+                  {{ row.alloc_tb != null ? row.alloc_tb : (row.size_tb ?? '-') }}
+                </template>
+              </el-table-column>
+              <el-table-column prop="used_tb" label="已用(TB)" width="100">
+                <template #default="{ row }">
+                  <span v-if="row.used_tb != null">{{ row.used_tb }}</span>
+                  <el-tooltip v-else placement="top" effect="dark"
+                              content="华为 SNMP MIB 的 LUN 表未提供已用容量列, 取不到就不显示 —— 不拿分配容量冒充">
+                    <span style="color: var(--text-sub); cursor: help">-</span>
+                  </el-tooltip>
+                </template>
+              </el-table-column>
+              <el-table-column label="使用率" width="140">
+                <template #default="{ row }">
+                  <el-progress v-if="row.used_percent != null"
+                               :percentage="Math.min(100, row.used_percent)"
+                               :stroke-width="8"
+                               :color="stPercentColor(row.used_percent)" />
+                  <span v-else style="color: var(--text-sub)">-</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="状态" width="90">
+                <template #default="{ row }">
+                  <el-tag :type="isOk(row) ? 'success' : 'danger'" size="small" effect="dark">
+                    {{ rowStatus(row) || '-' }}
+                  </el-tag>
+                </template>
+              </el-table-column>
             </el-table>
           </el-tab-pane>
         </el-tabs>
       </template>
+    </el-dialog>
+
+    <!-- 单块硬盘明细 -->
+    <el-dialog v-model="diskDetailVisible" width="620px" append-to-body
+               :title="`硬盘明细 - ${diskDetail?.location || diskDetail?.name || ''}`">
+      <el-descriptions v-if="diskDetail" :column="2" border size="small">
+        <el-descriptions-item label="槽位">{{ diskDetail.location || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="硬盘域">{{ diskDetail.disk_domain || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="型号" :span="2">{{ diskDetail.model || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="厂商">{{ diskDetail.vendor || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="类型">{{ diskDetail.disk_type || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="序列号" :span="2">
+          <span style="font-family: monospace">{{ diskDetail.serial || '-' }}</span>
+        </el-descriptions-item>
+        <el-descriptions-item label="固件版本">{{ diskDetail.firmware || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="扇区大小">
+          {{ diskDetail.sector_size != null ? diskDetail.sector_size + ' B' : '-' }}
+        </el-descriptions-item>
+        <el-descriptions-item label="容量">
+          {{ diskDetail.size_tb != null ? diskDetail.size_tb + ' TB' : '-' }}
+        </el-descriptions-item>
+        <el-descriptions-item label="已用">
+          {{ diskDetail.used_tb != null ? diskDetail.used_tb + ' TB' : '-' }}
+        </el-descriptions-item>
+        <el-descriptions-item label="使用率">
+          <span :style="{ color: stPercentColor(diskDetail.used_percent) }">
+            {{ diskDetail.used_percent != null ? diskDetail.used_percent + '%' : '-' }}
+          </span>
+        </el-descriptions-item>
+        <el-descriptions-item label="温度">
+          <span :style="{ color: diskDetail.temperature >= 50 ? '#ff4d5e' : 'inherit' }">
+            {{ diskDetail.temperature != null ? diskDetail.temperature + ' ℃' : '-' }}
+          </span>
+        </el-descriptions-item>
+        <el-descriptions-item label="运行时长">
+          {{ diskDetail.run_days != null ? diskDetail.run_days + ' 天' : '-' }}
+        </el-descriptions-item>
+        <el-descriptions-item label="转速">
+          {{ diskDetail.speed ? diskDetail.speed + ' RPM' : '-' }}
+        </el-descriptions-item>
+        <el-descriptions-item label="健康分">
+          <span v-if="diskDetail.health_score != null">{{ diskDetail.health_score }}</span>
+          <span v-else style="color: var(--text-sub)">该盘未上报</span>
+        </el-descriptions-item>
+        <el-descriptions-item label="状态">
+          <el-tag :type="isOk(diskDetail) ? 'success' : 'danger'" size="small" effect="dark">
+            {{ rowStatus(diskDetail) || '-' }}
+          </el-tag>
+        </el-descriptions-item>
+      </el-descriptions>
     </el-dialog>
   </div>
 </template>
@@ -371,6 +518,37 @@ function openDetail(d) {
   detailDevice.value = d
   detailTab.value = 'pools'
   detailVisible.value = true
+}
+
+// 存储容量配色与**告警阈值**对齐(80% 提示 / 90% 严重), 不用全局 percentColor
+// —— 那是按 70/90 画的, 会和告警规则对不上, 看着"黄灯"却已经发了告警。
+const ST_WARN = 80
+const ST_CRIT = 90
+function stPercentColor(v) {
+  const n = Number(v)
+  if (!Number.isFinite(n)) return 'var(--text-sub)'
+  if (n >= ST_CRIT) return '#ff4d5e'
+  if (n >= ST_WARN) return '#ffb020'
+  return '#00e396'
+}
+
+// 状态判绿: 后端存的是 running/health 两个字段(没有 status),
+// 只认"正常", 其余(故障/降级/状态27…)一律按异常色。
+function isOk(row) {
+  const s = row?.running || row?.health
+  return s === '正常'
+}
+function rowStatus(row) {
+  return row?.running || row?.health || ''
+}
+
+// ---------- 硬盘明细 ----------
+const diskDetailVisible = ref(false)
+const diskDetail = ref(null)
+
+function openDiskDetail(row) {
+  diskDetail.value = row
+  diskDetailVisible.value = true
 }
 
 onMounted(load)

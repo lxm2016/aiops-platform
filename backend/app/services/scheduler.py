@@ -289,6 +289,22 @@ async def poll_all_storage():
                         if data.get("used_percent"):
                             await evaluate_metric(db2, "storage", name, "used_percent",
                                                   data["used_percent"])
+                        # 细粒度: 整机 57% 不代表没有某个池/盘已经 90%+。
+                        # 上报对象名带上级前缀, 告警标题里才能看出是"哪台设备的哪个池"。
+                        det = data.get("details") or {}
+                        for p in det.get("pools") or []:
+                            if p.get("used_percent") is not None:
+                                await evaluate_metric(db2, "storage", f"{name}/{p.get('name')}",
+                                                      "pool_used_percent", p["used_percent"])
+                        for dsk in det.get("disks") or []:
+                            if dsk.get("used_percent") is not None:
+                                await evaluate_metric(db2, "storage",
+                                                      f"{name}/{dsk.get('location') or dsk.get('name')}",
+                                                      "disk_used_percent", dsk["used_percent"])
+                        for v in det.get("volumes") or []:
+                            if v.get("used_percent") is not None:
+                                await evaluate_metric(db2, "storage", f"{name}/{v.get('name')}",
+                                                      "lun_used_percent", v["used_percent"])
                         await evaluate_device_offline(db2, "storage", name, False)
                     else:
                         await evaluate_device_offline(db2, "storage", name, True)

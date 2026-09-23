@@ -54,8 +54,18 @@ DATA = {
     f"{B}.23.5.1.1.2": {s: "1" for s in DISK_SFX},
     f"{B}.23.5.1.1.3": {s: "27" for s in DISK_SFX},
     f"{B}.23.5.1.1.4": {s: f"CTE0.{i}" for i, s in enumerate(DISK_SFX)},
+    # .6 容量: MIB 未标单位, 这里给**字节**值(3.84TB 盘), 测单位自动判定
+    f"{B}.23.5.1.1.6": {s: "3840000000000" for s in DISK_SFX},
+    f"{B}.23.5.1.1.8": {s: "0" for s in DISK_SFX},
+    f"{B}.23.5.1.1.10": {s: "512" for s in DISK_SFX},
     f"{B}.23.5.1.1.11": {s: "37" for s in DISK_SFX},
     f"{B}.23.5.1.1.12": {s: "HSSD-D7B94DN3T8V" for s in DISK_SFX},
+    f"{B}.23.5.1.1.13": {s: "D7B94" for s in DISK_SFX},
+    f"{B}.23.5.1.1.14": {s: "HUAWEI" for s in DISK_SFX},
+    f"{B}.23.5.1.1.15": {s: f"SN{i:04d}" for i, s in enumerate(DISK_SFX)},
+    f"{B}.23.5.1.1.18": {s: "DiskDomain01" for s in DISK_SFX},
+    f"{B}.23.5.1.1.21": {s: "365" for s in DISK_SFX},
+    f"{B}.23.5.1.1.24": {s: "75" for s in DISK_SFX},    # 容量使用率 %
     f"{B}.23.5.1.1.25": {s: "255" for s in DISK_SFX},   # 255 = 未上报
     # LUN
     f"{B}.19.9.4.1.2": {str(i): f"LUN{i}" for i in range(16)},
@@ -141,6 +151,30 @@ def main():
     chk("控制器 2 个", len(d["controllers"]), 2)
     # 6) 私有版本字段不答时, 型号要能从 sysDescr 兜底出来
     chk("型号 sysDescr 兜底", d.get("version"), "Huawei OceanStor Dorado 5600 V6")
+
+    # 7) 硬盘明细
+    dk = d["disks"][0]
+    chk("硬盘容量单位判定", d.get("disk_cap_unit"), "B")
+    chk("硬盘 Σ裸容量 与池容量之比落在 0.5~3", 1.0 <= d.get("disk_cap_ratio", 0) <= 3.0, True)
+    chk("单盘容量 TiB(3.84TB=3.49TiB)", dk.get("size_tb"), 3.492, 0.02)
+    chk("单盘使用率 %", dk.get("used_percent"), 75)
+    chk("单盘已用 TiB", dk.get("used_tb"), 2.619, 0.02)
+    chk("单盘型号", dk.get("model"), "HSSD-D7B94DN3T8V")
+    chk("单盘序列号", dk.get("serial"), "SN0000")
+    chk("单盘厂商", dk.get("vendor"), "HUAWEI")
+    chk("单盘固件", dk.get("firmware"), "D7B94")
+    chk("单盘槽位", dk.get("location"), "CTE0.0")
+    chk("单盘硬盘域", dk.get("disk_domain"), "DiskDomain01")
+    chk("单盘类型(由型号推断)", dk.get("disk_type"), "SSD")
+    chk("单盘运行天数", dk.get("run_days"), 365)
+    chk("单盘扇区", dk.get("sector_size"), 512)
+
+    # 8) 卷: 分配容量有值, 已用量宁可留空也不冒充
+    v = d["volumes"][0]
+    chk("卷分配容量", v.get("alloc_tb"), 30.0, 0.01)
+    chk("卷已用留空(不冒充)", v.get("used_tb"), None)
+    chk("卷使用率留空", v.get("used_percent"), None)
+    chk("卷状态(1->正常)", v.get("running"), "正常")
 
     # 5) 反面: 使用率绝不能越界
     assert 0 <= r["used_percent"] <= 100, "使用率越界"

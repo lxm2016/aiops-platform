@@ -35,6 +35,10 @@ METRIC_LABELS = {
     "temperature": "温度",
     "humidity": "湿度",
     "used_percent": "容量使用率",
+    # ---- 存储细粒度(池/卷/硬盘) ----
+    "pool_used_percent": "存储池使用率",
+    "lun_used_percent": "卷使用率",
+    "disk_used_percent": "硬盘使用率",
     "port_down": "DOWN端口数",
     "offline": "设备离线",
     # ---- 动环设备(Modbus)点位 ----
@@ -55,6 +59,9 @@ METRIC_GROUPS = {
     "mem_percent": "内存",
     "disk_percent": "磁盘",
     "used_percent": "存储容量",
+    "pool_used_percent": "存储池容量",
+    "lun_used_percent": "卷容量",
+    "disk_used_percent": "硬盘容量",
     "port_down": "网络端口",
     "temperature": "温度",
     "humidity": "湿度",
@@ -90,6 +97,10 @@ DEFAULT_THRESHOLDS = {
     ("network", "cpu_percent"): ("gte", 80.0, 90.0),
     ("network", "mem_percent"): ("gte", 85.0, 95.0),
     ("storage", "used_percent"): ("gte", 80.0, 90.0),
+    # 细到池/卷/硬盘: 整机 57% 不代表没有某个池已经 92%
+    ("storage", "pool_used_percent"): ("gte", 80.0, 90.0),
+    ("storage", "lun_used_percent"): ("gte", 80.0, 90.0),
+    ("storage", "disk_used_percent"): ("gte", 80.0, 90.0),
     ("vmware", "cpu_percent"): ("gte", 80.0, 90.0),
     ("vmware", "mem_percent"): ("gte", 80.0, 90.0),
     ("env", "temperature"): ("gte", 30.0, 35.0),
