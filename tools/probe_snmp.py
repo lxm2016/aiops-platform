@@ -343,6 +343,7 @@ def main():
     ap.add_argument("--v3", action="store_true",
                     help="用 SNMPv3。华为 OceanStor 的「SNMPv1&v2c协议开关」"
                          "默认关闭时只能走这条")
+    ap.add_argument("--user", default="", help="v3 USM 用户名 (--v3 时必填)")
     # 别名 --auth-prob: 现场很容易手滑少打一个 t, 与其报"无法识别", 不如直接收下
     ap.add_argument("--auth-proto", "--auth-prob", dest="auth_proto",
                     default="sha", choices=sorted(AUTH_PROTOCOLS),
