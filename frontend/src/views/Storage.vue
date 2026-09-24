@@ -94,9 +94,18 @@
         <el-form-item label="采集协议">
           <el-select v-model="form.protocol" style="width: 100%">
             <el-option label="SNMP (通用, 推荐先试)" value="snmp" />
-            <el-option label="SMI-S / WBEM (华为/EMC等)" value="smi-s" />
+            <el-option label="SMI-S / WBEM (要卷已用容量必须选这个)" value="smi-s" />
             <el-option label="无 (仅手工登记)" value="none" />
           </el-select>
+          <div v-if="form.protocol === 'smi-s'" class="form-hint-block">
+            华为 SNMP 的 LUN 表没有"已用容量"字段（Dorado 5600 V6 实测仅 11 列），
+            卷级容量告警只能走 SMI-S。需填管理账号密码，并放通 5988/5989 端口；
+            服务器缺 pywbem 时采集会给出明确提示。
+          </div>
+          <div v-else-if="form.protocol === 'snmp'" class="form-hint-block">
+            SNMP 可采到存储池/硬盘/控制器的容量与健康状态；卷只能拿到“分配容量”，
+            已用量显示为 “-” —— 这是设备 MIB 的限制，不是采集失败。
+          </div>
         </el-form-item>
         <template v-if="form.protocol === 'snmp'">
           <el-form-item label="SNMP版本">
@@ -619,6 +628,14 @@ onMounted(load)
 .form-hint {
   margin-left: 10px;
   font-size: 12px;
+  color: var(--text-sub);
+}
+
+/* 块级提示: 占满一行, 不带行内那 10px 缩进 */
+.form-hint-block {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.7;
   color: var(--text-sub);
 }
 </style>

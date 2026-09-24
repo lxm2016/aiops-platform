@@ -452,11 +452,26 @@ async def collect_storage_snmp(ip: str, community, version: str = "2c") -> dict:
 def _collect_storage_wbem_sync(
     ip: str, username: str, password: str, namespace: str = "root/cimv2"
 ) -> dict:
-    """SMI-S采集 (pywbem, 同步)。枚举 CIM_ComputerSystem/StoragePool/LogicalDisk/PhysicalDisk。"""
-    import pywbem
+    """SMI-S采集 (pywbem, 同步)。枚举 CIM_ComputerSystem/StoragePool/StorageVolume/PhysicalDisk。
+
+    为什么保留这条链路: 华为 SNMP 的 LUN 表**没有已用容量**(Dorado 5600 V6 实测只有 11 列),
+    卷级容量告警只能靠 SMI-S 的 ConsumableBlocks 补齐。
+    """
+    try:
+        import pywbem
+    except ImportError as e:
+        # pywbem 不在 requirements.txt 里 —— 不给可操作提示的话,
+        # 界面上只会看到一个干巴巴的"采集失败", 排查要绕很久。
+        return {
+            "reachable": False, "source": "smi-s",
+            "capacity_tb": 0.0, "used_tb": 0.0, "used_percent": 0.0,
+            "details": {},
+            "error": f"缺少 pywbem: {e}。在服务器执行 "
+                     f"/opt/aiops-deploy/backend/venv/bin/pip install pywbem 后重试",
+        }
 
     result = {
-        "reachable": False,
+        "reachable": False, "source": "smi-s",
         "capacity_tb": 0.0,
         "used_tb": 0.0,
         "used_percent": 0.0,
@@ -529,12 +544,43 @@ def _collect_storage_wbem_sync(
             "used_percent": round(used / total * 100, 1) if total else 0,
         })
 
-    # 卷/LUN
-    for inst in _instances("CIM_LogicalDisk"):
-        size = int(_prop(inst, "MaxBlockSize", default=0) or 0) * int(_prop(inst, "NumberOfBlocks", default=0) or 0)
+    # 卷/LUN —— 这是 SNMP 给不了、只能走 SMI-S 的部分
+    #
+    # 为什么: 华为 SNMP 的 LUN 表(34774.4.1.19.9.4.1)只有 11 列(Dorado 5600 V6 实测),
+    # 没有"已用容量"; Zabbix 官方模板对 LUN 也只取容量+状态。而 SMI-S 的
+    # CIM_StorageVolume 有 ConsumableBlocks(剩余可用块数), 减去它就是已用。
+    #
+    # 注意别用 MaxBlockSize(那是"最大块大小"不是实际值), 要用 BlockSize。
+    vol_insts = []
+    for cls in ("CIM_StorageVolume", "CIM_LogicalDisk"):
+        vol_insts = _instances(cls)
+        if vol_insts:
+            break
+    for inst in vol_insts:
+        blocks = int(_prop(inst, "NumberOfBlocks", default=0) or 0)
+        blk = int(_prop(inst, "BlockSize", default=0) or 0) or \
+            int(_prop(inst, "MaxBlockSize", default=0) or 0)
+        consumable = _prop(inst, "ConsumableBlocks", default=None)
+        size_b = blocks * blk
+        used_b = 0
+        pct = None
+        if consumable is not None and blocks and blk:
+            try:
+                left = int(consumable)
+                if 0 <= left <= blocks:
+                    used_b = (blocks - left) * blk
+                    pct = round(used_b / size_b * 100, 1) if size_b else None
+            except (TypeError, ValueError):
+                pass
         result["details"]["volumes"].append({
             "name": str(_prop(inst, "ElementName", "DeviceID", "Name", default="卷")),
-            "size_tb": round(size / (1024 ** 4), 2),
+            "size_tb": round(size_b / (1024 ** 4), 3) if size_b else None,
+            "alloc_tb": round(size_b / (1024 ** 4), 3) if size_b else None,
+            # 用 pct 而不是 used_b 判空: 已用为 0 是"算出来了是 0",
+            # 不能和"取不到 ConsumableBlocks"混为一谈(后者前端才显示 '-')
+            "used_tb": round(used_b / (1024 ** 4), 3) if pct is not None else None,
+            "used_percent": pct,
+            "running": _first_status(inst),
         })
 
     # 物理磁盘
@@ -542,8 +588,9 @@ def _collect_storage_wbem_sync(
         cap = int(_prop(inst, "Capacity", default=0) or 0)
         result["details"]["disks"].append({
             "name": str(_prop(inst, "ElementName", "DeviceID", "Name", default="磁盘")),
-            "size_tb": round(cap / (1024 ** 4), 2),
+            "size_tb": round(cap / (1024 ** 4), 3) if cap else None,
             "status": _first_status(inst),
+            "running": _first_status(inst),
         })
 
     if total_bytes:

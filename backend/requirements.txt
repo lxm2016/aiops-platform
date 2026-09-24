@@ -10,6 +10,9 @@ python-multipart==0.0.20
 httpx==0.28.1
 openai==1.59.7
 pysnmp==7.1.16
+# SMI-S (WBEM/CIM) 采集用 —— 仅"协议=SMI-S"的存储设备需要。
+# 华为 SNMP 的 LUN 表没有已用容量, 卷级容量告警必须走这条。
+pywbem==3.3.0
 pyvmomi==8.0.3.0.1
 apscheduler==3.11.0
 aiosqlite==0.20.0
