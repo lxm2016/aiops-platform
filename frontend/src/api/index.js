@@ -135,6 +135,8 @@ export const serverApi = {
   detail: (id) => http.get(`/servers/${id}/detail`),
   // 只读诊断 + AI 分析 (Linux SSH / Windows WinRM)
   diagnose: (id) => http.post(`/servers/${id}/diagnose`, null, { timeout: 120000 }),
+  // 快速测试诊断凭据能否连上 (可用表单里未保存的密码)
+  testConn: (id, data) => http.post(`/servers/${id}/test-connection`, data, { timeout: 30000 }),
   summary: () => http.get('/servers/stats/summary')
 }
 

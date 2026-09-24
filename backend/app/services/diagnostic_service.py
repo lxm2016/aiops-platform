@@ -14,6 +14,8 @@
 """
 import asyncio
 import logging
+import re
+import time
 from typing import Dict, List, Optional
 
 from sqlalchemy import select
@@ -69,6 +71,18 @@ WINDOWS_POWERSHELL: Dict[str, List[str]] = {
 SECTION_LABELS = {"cpu": "CPU", "memory": "内存", "disk": "磁盘", "process": "进程/IO"}
 
 
+def _classify_conn_error(msg: str) -> str:
+    """把底层报错翻译成运维能直接行动的提示。"""
+    low = (msg or "").lower()
+    if "401" in low or "credentials" in low or "auth" in low or "login" in low or "access denied" in low:
+        return "认证被拒绝：用户名/密码不对，或目标 WinRM 未开启对应认证方式（见提示）"
+    if "timed out" in low or "timeout" in low or "unreachable" in low or "refused" in low or "no route" in low:
+        return "网络不通或端口未放行：检查 IP/端口、目标防火墙是否放行 22/5985"
+    if "winrm" in low and ("encrypted" in low or "basic" in low):
+        return "目标 WinRM 认证方式未开启（需 Basic/AllowUnencrypted，或改用 NTLM）"
+    return ""
+
+
 def _run_linux(server: Server) -> Dict:
     """通过 SSH 在 Linux 上执行只读命令（同步，放到线程里跑）。"""
     try:
@@ -90,7 +104,9 @@ def _run_linux(server: Server) -> Dict:
             allow_agent=False,
         )
     except Exception as e:
-        return {"ok": False, "error": f"SSH 连接失败 ({server.ip}:{port}): {e}"}
+        hint = _classify_conn_error(str(e))
+        return {"ok": False, "error": f"SSH 连接失败 ({server.ip}:{port}): {e}"
+                                       + (f" —— {hint}" if hint else "")}
 
     sections: Dict[str, str] = {}
     try:
@@ -112,21 +128,50 @@ def _run_linux(server: Server) -> Dict:
 
 
 def _run_windows(server: Server) -> Dict:
-    """通过 WinRM 在 Windows 上执行只读 PowerShell（同步，放到线程里跑）。"""
+    """通过 WinRM 在 Windows 上执行只读 PowerShell（同步，放到线程里跑）。
+
+    认证策略：先试 NTLM（本地 administrator 开箱即用，不要求目标开 Basic/明文），
+    失败再退回 plaintext(HTTP Basic，需目标开 Basic 且 AllowUnencrypted)。
+    pywinrm 建会话不会真正连网，所以用一条最小探测命令来确认认证方式可用。
+    """
     try:
         import winrm
     except ImportError:
         return {"ok": False, "error": "后端 venv 未安装 pywinrm，无法 WinRM 诊断。请用后端 venv 的 pip 安装（勿用系统 pip，Debian/Ubuntu 会报 externally-managed）：{venv}/bin/pip install paramiko pywinrm —— 离线 wheel 随包附于 backend/packages/diag-wheels(-py312)"}
 
     port = server.diag_port or 5985
-    try:
-        session = winrm.Session(
-            f"http://{server.ip}:{port}/wsman",
-            auth=(server.diag_user, server.diag_password or ""),
-            server_cert_validation="ignore",
-        )
-    except Exception as e:
-        return {"ok": False, "error": f"WinRM 会话创建失败 ({server.ip}:{port}): {e}"}
+    endpoint = f"http://{server.ip}:{port}/wsman"
+    last_err: Optional[str] = None
+    session = None
+    used_transport: Optional[str] = None
+
+    for transport in ("ntlm", "plaintext"):
+        try:
+            s = winrm.Session(
+                endpoint,
+                auth=(server.diag_user, server.diag_password or ""),
+                transport=transport,
+                server_cert_validation="ignore",
+            )
+            probe = s.run_ps("Write-Output ok")
+            if probe.status_code == 0:
+                session, used_transport = s, transport
+                break
+            last_err = (probe.std_err.decode("utf-8", "replace") or f"exit={probe.status_code}").strip()
+        except Exception as e:      # ntlm 缺 requests-ntlm 等情况 → 换下一种方式
+            last_err = str(e)
+            session = None
+
+    if session is None:
+        hint = _classify_conn_error(last_err or "")
+        extra = ""
+        if "认证" in (hint or ""):
+            extra = ("。目标机排查建议: ① 确认账号密码; ② 目标机执行 winrm quickconfig; "
+                     "③ 若仍不行, 在目标机开启 Basic: winrm set winrm/config/service/auth @{Basic=\"true\"} "
+                     "与 winrm set winrm/config/service @{AllowUnencrypted=\"true\"} (HTTP/5985 时)")
+        return {"ok": False,
+                "error": f"WinRM 连接失败 ({server.ip}:{port}): {last_err}"
+                         + (f" —— {hint}" if hint else "") + extra}
 
     sections: Dict[str, str] = {}
     for sec, scripts in WINDOWS_POWERSHELL.items():
@@ -143,7 +188,80 @@ def _run_windows(server: Server) -> Dict:
                 blocks.append(f"PS> {script}\n[执行失败: {e}]")
         sections[sec] = "\n\n".join(blocks)
 
-    return {"ok": True, "os_type": "windows", "host": f"{server.ip}:{port}", "sections": sections}
+    return {"ok": True, "os_type": "windows", "host": f"{server.ip}:{port}",
+            "transport": used_transport, "sections": sections}
+
+
+# ---------- 测试连接（一条最小命令, 快速验证 IP/端口/账号密码） ----------
+def _ssh_probe(ip: str, port: int, user: str, password: str) -> Dict:
+    try:
+        import paramiko
+    except ImportError:
+        return {"ok": False, "detail": "后端 venv 未安装 paramiko，请用 venv 的 pip 安装"}
+    try:
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.connect(hostname=ip, port=port, username=user, password=password,
+                       timeout=10, look_for_keys=False, allow_agent=False)
+    except Exception as e:
+        hint = _classify_conn_error(str(e))
+        return {"ok": False, "detail": f"SSH 连接失败 ({ip}:{port}): {e}" + (f" —— {hint}" if hint else "")}
+    try:
+        _, stdout, _ = client.exec_command("echo ok", timeout=10)
+        out = stdout.read().decode("utf-8", "replace").strip()
+        if "ok" in out:
+            return {"ok": True, "detail": "SSH 认证并执行成功"}
+        return {"ok": False, "detail": f"SSH 已连上但执行异常: {out[:200]}"}
+    finally:
+        client.close()
+
+
+def _winrm_probe(ip: str, port: int, user: str, password: str) -> Dict:
+    try:
+        import winrm
+    except ImportError:
+        return {"ok": False, "detail": "后端 venv 未安装 pywinrm，请用 venv 的 pip 安装"}
+    endpoint = f"http://{ip}:{port}/wsman"
+    last_err: Optional[str] = None
+    for transport in ("ntlm", "plaintext"):
+        try:
+            s = winrm.Session(endpoint, auth=(user, password), transport=transport,
+                              server_cert_validation="ignore")
+            r = s.run_ps("Write-Output ok")
+            if r.status_code == 0:
+                return {"ok": True, "detail": f"WinRM 认证并执行成功 (transport={transport})"}
+            last_err = (r.std_err.decode("utf-8", "replace") or f"exit={r.status_code}").strip()
+        except Exception as e:
+            last_err = str(e)
+    hint = _classify_conn_error(last_err or "")
+    return {"ok": False, "detail": f"WinRM 连接失败 ({ip}:{port}): {last_err}"
+                                   + (f" —— {hint}" if hint else "")}
+
+
+async def test_connection(
+    server: Server,
+    diag_user: Optional[str] = None,
+    diag_password: Optional[str] = None,
+    diag_port: Optional[int] = None,
+) -> Dict:
+    """快速测试只读诊断凭据能否连上（只跑一条最小命令，不做任何修改）。
+
+    diag_* 传参可覆盖已存值 —— 前端"测试连接"按钮可用表单里刚输入、尚未保存的密码。
+    """
+    user = diag_user if diag_user not in (None, "") else server.diag_user
+    password = diag_password if diag_password not in (None, "") else server.diag_password
+    port = diag_port or server.diag_port
+    if not user:
+        return {"ok": False, "detail": "未配置登录用户，请先在『编辑服务器 → 只读诊断凭据』填写"}
+    if not password:
+        return {"ok": False, "detail": "登录密码为空（表单留空且库里也没有保存过）。请输入密码后重试"}
+    started = time.time()
+    if server.os_type == "windows":
+        res = await asyncio.to_thread(_winrm_probe, server.ip, port or 5985, user, password)
+    else:
+        res = await asyncio.to_thread(_ssh_probe, server.ip, port or 22, user, password)
+    res["latency_ms"] = int((time.time() - started) * 1000)
+    return res
 
 
 async def diagnose_server(server: Server) -> Dict:
@@ -152,6 +270,12 @@ async def diagnose_server(server: Server) -> Dict:
         return {
             "ok": False,
             "error": "未配置诊断凭据（用户名/密码）。请先在服务器编辑中填写 SSH/WinRM 账号。",
+        }
+    if not server.diag_password:
+        return {
+            "ok": False,
+            "error": "登录密码为空（SSH/WinRM 密码认证必须有密码）。"
+                     "请在『编辑服务器 → 只读诊断凭据』输入密码保存，可先用『测试连接』验证。",
         }
     if server.os_type == "windows":
         return await asyncio.to_thread(_run_windows, server)
@@ -192,4 +316,8 @@ async def diagnose_and_analyze(server: Server) -> Dict:
         )
     except Exception as e:
         analysis = f"AI 分析失败：{e}"
+    # 剥掉推理型模型(DeepSeek-R1 等)泄漏的 <think>…</think>，只给用户看结论
+    analysis = re.sub(r"<think>.*?</think>", "", analysis or "", flags=re.S).strip()
+    if not analysis:
+        analysis = "（模型未返回有效分析内容，请检查模型配置）"
     return {**diag, "analysis": analysis, "raw_text": raw_text}

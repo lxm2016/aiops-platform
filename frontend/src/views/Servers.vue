@@ -115,8 +115,22 @@
           <div class="form-tip">Linux SSH 默认 22；Windows WinRM 默认 5985</div>
         </el-form-item>
       </el-form>
+
+      <el-alert
+        v-if="testResult"
+        :type="testResult.ok ? 'success' : 'error'"
+        :closable="false"
+        style="margin-bottom: 10px"
+      >
+        <template #title>
+          {{ testResult.ok ? '✓ ' : '✗ ' }}{{ testResult.detail }}
+          <span v-if="testResult.ok && testResult.latency_ms != null">（{{ testResult.latency_ms }}ms）</span>
+        </template>
+      </el-alert>
+
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
+        <el-button :loading="testing" @click="handleTestConn">测试连接</el-button>
         <el-button type="primary" :loading="submitting" @click="handleSubmit">确定</el-button>
       </template>
     </el-dialog>
@@ -137,6 +151,8 @@ const dialogVisible = ref(false)
 const submitting = ref(false)
 const editingId = ref(null)
 const formRef = ref(null)
+const testing = ref(false)
+const testResult = ref(null)
 
 const EMPTY_FORM = {
   name: '',
@@ -208,7 +224,29 @@ function openEdit(row) {
     diag_password: '',                 // 出于安全不回显密码, 留空即不修改
     diag_port: row.diag_port || 22,
   })
+  testResult.value = null
   dialogVisible.value = true
+}
+
+// 测试连接：用表单里刚输入（尚未保存）的凭据直接测，密码留空则用已存密码
+async function handleTestConn() {
+  if (!editingId.value) {
+    ElMessage.warning('新服务器请先点「确定」保存，再编辑测试连接')
+    return
+  }
+  testing.value = true
+  testResult.value = null
+  try {
+    const payload = {}
+    if (form.diag_user) payload.diag_user = form.diag_user
+    if (form.diag_password) payload.diag_password = form.diag_password
+    if (form.diag_port) payload.diag_port = form.diag_port
+    testResult.value = await serverApi.testConn(editingId.value, payload)
+  } catch (e) {
+    testResult.value = { ok: false, detail: (e && e.message) || '测试请求失败' }
+  } finally {
+    testing.value = false
+  }
 }
 
 async function handleDelete(row) {

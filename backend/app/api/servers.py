@@ -11,7 +11,7 @@ from app.core.config import get_settings
 from app.core.database import get_db
 from app.models import Server, ServerMetric, Alert
 from app.schemas.schemas import (
-    ServerCreate, ServerOut, MetricReport, ServerMetricOut,
+    ServerCreate, ServerOut, MetricReport, ServerMetricOut, ServerTestIn,
 )
 from app.services.alert_engine import (
     evaluate_server_metrics, evaluate_device_offline, flush_notifications,
@@ -103,6 +103,28 @@ async def diagnose_server_endpoint(server_id: int, db: AsyncSession = Depends(ge
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"诊断失败: {e}")
     return result
+
+
+@router.post("/{server_id}/test-connection")
+async def test_connection_endpoint(
+    server_id: int, data: ServerTestIn, db: AsyncSession = Depends(get_db)
+):
+    """快速测试只读诊断凭据能否连上（只跑一条最小命令，全程只读）。
+
+    支持用表单里尚未保存的密码直接测试（diag_* 覆盖已存值，留空则用已存密码）。
+    """
+    server = await db.get(Server, server_id)
+    if not server:
+        raise HTTPException(status_code=404, detail="服务器不存在")
+    try:
+        return await diagnostic_service.test_connection(
+            server,
+            diag_user=data.diag_user,
+            diag_password=data.diag_password,
+            diag_port=data.diag_port,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"测试失败: {e}")
 
 
 @router.get("/{server_id}/metrics", response_model=List[ServerMetricOut])

@@ -65,6 +65,13 @@ class ServerOut(BaseModel):
         from_attributes = True
 
 
+class ServerTestIn(BaseModel):
+    """测试连接: 允许用表单里尚未保存的凭据覆盖已存值(密码留空则用已存密码)。"""
+    diag_user: Optional[str] = None
+    diag_password: Optional[str] = None
+    diag_port: Optional[int] = None
+
+
 class MetricReport(BaseModel):
     """Payload the agent POSTs to the platform."""
     ip: str
