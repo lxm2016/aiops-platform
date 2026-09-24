@@ -311,6 +311,107 @@ async def dump_table(engine, target, auth, ctx, table_oid, max_col=40, label="")
     print(f"\n  共 {len(hits)} 列有数据。把本段整体贴回来即可定死每个列号的含义。")
 
 
+async def sniff_lun_used(engine, target, auth, ctx, max_col=30):
+    """在 LUN 表里自动定位"已用容量"列 —— **自校验, 不靠猜**。
+
+    以 .5(总容量, 单位 KB) 为基准, 逐列检查三条硬判据:
+      ① 全是数值(文本列如名称直接排除)
+      ② 每个 LUN 都满足 0 <= v <= 总容量     —— 已用不可能大于总容量
+      ③ 至少有一个 LUN 的 v < 总容量          —— 否则它只是容量的副本, 不是已用
+    三条同时满足 -> 高度疑似"已用容量", 并把"每 LUN 使用率"算出来给你看。
+    """
+    print("\n" + "=" * 78)
+    print(" LUN 表「已用容量」列自动定位")
+    print("=" * 78)
+
+    size_rows = await _walk(engine, target, auth, ctx, f"{HW_LUN_TABLE}.5")
+    name_rows = await _walk(engine, target, auth, ctx, f"{HW_LUN_TABLE}.2")
+    if not size_rows:
+        print(" 取不到 .5(总容量), 无法做基准比对。先确认凭据/上下文是否正确。")
+        return None
+
+    sizes = {}
+    for sfx, v in size_rows:
+        try:
+            sizes[sfx] = int(str(v).strip())
+        except (TypeError, ValueError):
+            pass
+    names = dict(name_rows) if name_rows else {}
+    if not sizes:
+        print(" .5 返回的不是数值, 无法比对。")
+        return None
+
+    print(f" 基准 .5 总容量(KB): {len(sizes)} 个 LUN\n")
+
+    found = []
+    for col in range(1, max_col + 1):
+        if col == 5:
+            continue
+        rows = await _walk(engine, target, auth, ctx, f"{HW_LUN_TABLE}.{col}")
+        if not rows or rows[0][0] == "__error__":
+            continue
+        # 按实例对齐到容量表
+        cand = {}
+        numeric = True
+        for sfx, v in rows:
+            try:
+                cand[sfx] = int(str(v).strip())
+            except (TypeError, ValueError):
+                numeric = False
+                break
+        if not numeric or not cand:
+            continue
+        # 判据 ②: 0 <= v <= 总容量
+        common = [s for s in sizes if s in cand]
+        if len(common) < max(2, len(sizes) // 2):
+            continue
+        if any(cand[s] < 0 or cand[s] > sizes[s] for s in common):
+            continue
+        # 判据 ③: 至少有一个 LUN 明显小于总容量
+        if all(cand[s] == sizes[s] for s in common):
+            continue
+        # 判据 ④: 量级必须与容量同量级 —— 否则是状态码/百分比这类小整数列。
+        #   实测踩过: 状态列 .11 恒为 1, 满足 0<=1<=总容量 且 1!=总容量,
+        #   会被误当成"已用容量"。要求该列最大值 >= 最大总容量的千分之一,
+        #   状态码(0/1/2)直接出局, 且这个阈值随设备规模自适应。
+        if max(cand[s] for s in common) < max(sizes.values()) * 0.001:
+            continue
+        found.append((col, cand, common))
+
+    if not found:
+        print(" ✗ 未找到符合条件的列 —— 该型号 SNMP 的 LUN 表**很可能没有已用容量字段**。")
+        print("   (Zabbix 官方华为模板对 LUN 也只取容量+状态, 与此结论一致)")
+        print("   若仍需监控卷使用率, 只能改走 SMI-S/REST, 或按存储池粒度告警。")
+        return None
+
+    print(f" ✓ 找到 {len(found)} 个候选列:\n")
+    sig_total = sum(sizes.values()) or 1
+    for col, cand, common in found:
+        sig = sum(cand[s] for s in common)
+        ratio = sig / sig_total * 100
+        print(f" ── 列 .{col} ──  Σ该列 / Σ总容量 = {ratio:.1f}%"
+              f"{'   (单位可能与 .5 不一致, 需人工确认)' if ratio > 100 else ''}")
+        shown = 0
+        for sfx in sorted(common, key=lambda s: -sizes.get(s, 0)):
+            nm = names.get(sfx, f"LUN{sfx}")
+            sz, us = sizes[sfx], cand[sfx]
+            pct = us / sz * 100 if sz else 0
+            print(f"    {nm:<24} 总 {sz / 1048576:>8.2f} TiB"
+                  f"  该列 {us / 1048576:>8.2f} TiB  → {pct:5.1f}%")
+            shown += 1
+            if shown >= 8:
+                rest = len(common) - shown
+                if rest:
+                    print(f"    ... 另有 {rest} 个 LUN")
+                break
+        print()
+    best = found[0][0]
+    print(f" 结论: 最可能是「已用容量」的列 = .{best}"
+          f"   候选: {', '.join('.' + str(c[0]) for c in found)}")
+    print(f" 把上面整段贴回给开发即可 —— 平台会按 .{best} 取已用容量并启用卷级 80/90 告警。")
+    return best
+
+
 async def scan_storage(engine, target, auth, ctx):
     """存储专用: 先探华为私有 MIB, 再探标准 hrStorage, 顺带验证 SNMPv3。"""
     print("\n" + "=" * 78)
@@ -385,7 +486,9 @@ async def main_async(args):
         print(f"设备自述(sysDescr): {str(desc).strip().splitlines()[0][:110]}")
 
     if args.sniff_lun:
+        # 先列全貌(留证据), 再自动定位已用容量列(给结论)
         await dump_table(engine, target, auth, ctx, HW_LUN_TABLE, label="华为 LUN 表")
+        await sniff_lun_used(engine, target, auth, ctx)
         return 0
     if args.dump_table:
         await dump_table(engine, target, auth, ctx, args.dump_table)
