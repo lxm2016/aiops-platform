@@ -68,6 +68,24 @@
       </div>
 
       <div class="chat-input">
+        <div class="chat-input-extra">
+          <span class="extra-label"><el-icon><Connection /></el-icon>&nbsp;关联服务器（可选，将实时只读诊断数据一并分析）</span>
+          <el-select
+            v-model="selectedServer"
+            placeholder="不关联"
+            clearable
+            filterable
+            size="small"
+            style="width: 240px"
+          >
+            <el-option
+              v-for="s in serverOptions"
+              :key="s.id"
+              :label="`${s.name} (${s.ip})`"
+              :value="s.id"
+            />
+          </el-select>
+        </div>
         <el-input
           v-model="input"
           type="textarea"
@@ -180,7 +198,7 @@
 <script setup>
 import { ref, reactive, computed, nextTick, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { chatApi, settingsApi } from '@/api'
+import { chatApi, settingsApi, serverApi } from '@/api'
 import { formatTime } from '@/utils/format'
 
 const sessionId = 'web-' + (localStorage.getItem('username') || 'default')
@@ -188,6 +206,8 @@ const messages = ref([])
 const input = ref('')
 const sending = ref(false)
 const bodyRef = ref(null)
+const selectedServer = ref(null)
+const serverOptions = ref([])
 
 const quickQuestions = [
   '当前有哪些未处理的告警？',
@@ -236,7 +256,7 @@ async function send() {
   sending.value = true
   scrollToBottom()
   try {
-    const res = await chatApi.send(text, sessionId)
+    const res = await chatApi.send(text, sessionId, selectedServer.value)
     messages.value.push({ role: 'assistant', content: res.reply, time: new Date().toISOString() })
   } catch (e) {
     messages.value.push({
@@ -247,6 +267,14 @@ async function send() {
   } finally {
     sending.value = false
     scrollToBottom()
+  }
+}
+
+async function loadServers() {
+  try {
+    serverOptions.value = await serverApi.list()
+  } catch (e) {
+    serverOptions.value = []
   }
 }
 
@@ -391,7 +419,10 @@ async function handleSaveLlm() {
   }
 }
 
-onMounted(loadHistory)
+onMounted(() => {
+  loadHistory()
+  loadServers()
+})
 </script>
 
 <style scoped>
@@ -567,6 +598,22 @@ onMounted(loadHistory)
   padding: 14px 16px;
   border-top: 1px solid var(--border-tech);
   align-items: flex-end;
+  flex-wrap: wrap;
+}
+
+.chat-input-extra {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.extra-label {
+  font-size: 12px;
+  color: var(--text-sub);
+  display: inline-flex;
+  align-items: center;
 }
 
 .chat-input :deep(.el-textarea) {

@@ -39,6 +39,9 @@
           <el-button type="primary" @click="loadMetrics">查询</el-button>
         </template>
         <el-button :icon="Refresh" @click="loadAll">刷新</el-button>
+        <el-button type="warning" :icon="Monitor" @click="openDiagnose" :loading="diagLoading">
+          智能诊断（只读）
+        </el-button>
       </div>
     </div>
 
@@ -132,6 +135,45 @@
         </el-table-column>
       </el-table>
     </el-card>
+
+    <!-- 智能诊断抽屉（只读：只采集，不修改） -->
+    <el-drawer v-model="diagVisible" title="智能诊断（只读排查）" size="62%" :destroy-on-close="true">
+      <div v-loading="diagLoading">
+        <el-alert
+          type="info"
+          :closable="false"
+          show-icon
+          title="只读排查 · 人工处置"
+          description="本功能仅通过 SSH(Linux) / WinRM(Windows) 执行只读命令采集 CPU/内存/磁盘/进程，不会做任何修改。AI 给出原因分析与人工处置建议，实际修复请运维人员手动执行。"
+          style="margin-bottom: 16px"
+        />
+
+        <el-alert
+          v-if="diagResult && !diagResult.ok"
+          type="error"
+          :closable="false"
+          :title="diagResult.error"
+          style="margin-bottom: 16px"
+        />
+
+        <template v-if="diagResult && diagResult.ok">
+          <div class="diag-block-title">AI 分析（原因 + 人工处置建议）</div>
+          <pre class="diag-analysis">{{ diagResult.analysis }}</pre>
+
+          <div class="diag-block-title">原始只读诊断数据</div>
+          <el-collapse v-model="activeDiag">
+            <el-collapse-item
+              v-for="sec in diagSections"
+              :key="sec.key"
+              :name="sec.key"
+              :title="sec.label"
+            >
+              <pre class="diag-raw">{{ sec.content }}</pre>
+            </el-collapse-item>
+          </el-collapse>
+        </template>
+      </div>
+    </el-drawer>
   </div>
 </template>
 
@@ -139,7 +181,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { Refresh, ArrowLeft } from '@element-plus/icons-vue'
+import { Refresh, ArrowLeft, Monitor } from '@element-plus/icons-vue'
 import { serverApi } from '@/api'
 import StatCard from '@/components/StatCard.vue'
 import TrendChart from '@/components/TrendChart.vue'
@@ -343,5 +385,67 @@ async function loadAll() {
   }
 }
 
+// ---------- 智能诊断（只读） ----------
+const diagVisible = ref(false)
+const diagLoading = ref(false)
+const diagResult = ref(null)
+const activeDiag = ref(['cpu', 'memory', 'disk', 'process'])
+
+const diagSections = computed(() => {
+  const sec = diagResult.value?.sections || {}
+  const labels = { cpu: 'CPU', memory: '内存', disk: '磁盘', process: '进程/IO' }
+  return Object.keys(labels)
+    .filter((k) => sec[k])
+    .map((k) => ({ key: k, label: labels[k], content: sec[k] }))
+})
+
+async function openDiagnose() {
+  diagVisible.value = true
+  diagResult.value = null
+  diagLoading.value = true
+  try {
+    const res = await serverApi.diagnose(serverId)
+    diagResult.value = res
+    if (!res.ok) ElMessage.error(res.error || '诊断失败')
+  } catch (e) {
+    ElMessage.error('诊断请求失败，请检查后端日志')
+  } finally {
+    diagLoading.value = false
+  }
+}
+
 onMounted(loadAll)
 </script>
+
+<style scoped>
+.diag-block-title {
+  font-weight: 600;
+  color: #00d4ff;
+  margin: 14px 0 8px;
+  font-size: 14px;
+}
+.diag-analysis {
+  background: rgba(18, 33, 60, 0.85);
+  border: 1px solid var(--border-tech, #1c2f4f);
+  border-radius: 8px;
+  padding: 14px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.7;
+  font-size: 13px;
+  color: #d6e2f5;
+}
+.diag-raw {
+  background: #0c1626;
+  border-radius: 6px;
+  padding: 10px 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  line-height: 1.55;
+  color: #9fb3d1;
+  max-height: 360px;
+  overflow: auto;
+}
+</style>
+

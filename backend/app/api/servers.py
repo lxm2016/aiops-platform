@@ -17,6 +17,7 @@ from app.services.alert_engine import (
     evaluate_server_metrics, evaluate_device_offline, flush_notifications,
     invalidate_ip_cache,
 )
+from app.services import diagnostic_service
 
 router = APIRouter(prefix="/api/servers", tags=["servers"])
 settings = get_settings()
@@ -63,6 +64,45 @@ async def delete_server(server_id: int, db: AsyncSession = Depends(get_db)):
     await db.commit()
     invalidate_ip_cache()
     return {"ok": True}
+
+
+@router.put("/{server_id}", response_model=ServerOut)
+async def update_server(
+    server_id: int, data: ServerCreate, db: AsyncSession = Depends(get_db)
+):
+    """编辑服务器（含只读诊断凭据）。只更新请求中提供的字段。"""
+    server = await db.get(Server, server_id)
+    if not server:
+        raise HTTPException(status_code=404, detail="服务器不存在")
+    # IP 唯一性（排除自身）
+    if data.ip is not None and data.ip != server.ip:
+        dup = await db.execute(
+            select(Server).where(Server.ip == data.ip, Server.id != server_id)
+        )
+        if dup.scalar_one_or_none():
+            raise HTTPException(status_code=400, detail="该IP已存在")
+    for k, v in data.model_dump(exclude_unset=True).items():
+        setattr(server, k, v)
+    await db.commit()
+    await db.refresh(server)
+    invalidate_ip_cache()
+    return server
+
+
+@router.post("/{server_id}/diagnose")
+async def diagnose_server_endpoint(server_id: int, db: AsyncSession = Depends(get_db)):
+    """只读诊断 + AI 分析：连到服务器采集 CPU/内存/磁盘/进程, 由大模型给原因与人工处置建议。
+
+    注：全程只读, 不执行任何修改操作。
+    """
+    server = await db.get(Server, server_id)
+    if not server:
+        raise HTTPException(status_code=404, detail="服务器不存在")
+    try:
+        result = await diagnostic_service.diagnose_and_analyze(server)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"诊断失败: {e}")
+    return result
 
 
 @router.get("/{server_id}/metrics", response_model=List[ServerMetricOut])

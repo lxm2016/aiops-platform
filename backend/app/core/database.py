@@ -127,6 +127,11 @@ def _migrate_sqlite():
         cur = conn.cursor()
         for table, columns in {
             "switch_ports": [("physical", "INTEGER DEFAULT 1")],
+            "servers": [
+                ("diag_user", "VARCHAR(128) DEFAULT ''"),
+                ("diag_password", "VARCHAR(256) DEFAULT ''"),
+                ("diag_port", "INTEGER DEFAULT 22"),
+            ],
             "alerts": [            # 可配置告警规则改造新增的列
                 ("rule_id", "INTEGER"),
                 ("metric", "TEXT DEFAULT ''"),

@@ -25,6 +25,12 @@ class Server(Base):
     agent_installed = Column(Boolean, default=False)
     last_seen = Column(DateTime, nullable=True)
     tags = Column(String(256), default="")
+    # ---- 只读诊断凭据 (AI 连服务器排查 CPU/内存/磁盘用, 绝不做写操作) ----
+    # Linux 走 SSH, Windows 走 WinRM; 密码在 API 返回时不做脱敏(内网运维工具,
+    # 与 storage_devices 的 username/password 处理一致)。
+    diag_user = Column(String(128), default="")
+    diag_password = Column(String(256), default="")
+    diag_port = Column(Integer, default=22)         # Linux SSH=22 / Windows WinRM=5985
     created_at = Column(DateTime, default=datetime.utcnow)
 
     metrics = relationship("ServerMetric", back_populates="server", cascade="all, delete-orphan")

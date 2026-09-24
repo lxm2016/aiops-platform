@@ -7,6 +7,7 @@ from app.core.database import get_db
 from app.models import ChatMessage, Server, Alert, NetworkDevice, EnvSensor
 from app.schemas.schemas import ChatRequest, ChatResponse
 from app.services.llm_service import chat_completion
+from app.services import diagnostic_service
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
@@ -64,6 +65,25 @@ async def chat(req: ChatRequest, db: AsyncSession = Depends(get_db)):
     db.add(ChatMessage(session_id=req.session_id, role="user", content=req.message))
 
     context = await _build_monitoring_context(db)
+
+    # 可选：关联服务器时, 先做一次【只读】诊断, 把实时数据注入分析上下文
+    if req.server_id:
+        srv = await db.get(Server, req.server_id)
+        if srv and srv.diag_user:
+            try:
+                diag = await diagnostic_service.diagnose_server(srv)
+                if diag.get("ok"):
+                    extra = diagnostic_service._format_sections(diag.get("sections", {}))
+                    context += (
+                        f"\n\n[实时只读诊断 - {srv.name}({srv.ip})]\n{extra}"
+                    )
+                else:
+                    context += (
+                        f"\n\n[注: 尝试对 {srv.name} 做只读诊断失败: {diag.get('error')}]"
+                    )
+            except Exception as e:
+                logger.warning(f"[chat] 服务器只读诊断失败 server={req.server_id}: {e}")
+
     reply = await chat_completion(req.message, history=history, context=context)
 
     db.add(ChatMessage(session_id=req.session_id, role="assistant", content=reply))

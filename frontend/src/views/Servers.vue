@@ -57,11 +57,12 @@
         <el-table-column label="最后上报" width="170">
           <template #default="{ row }">{{ formatTime(row.last_seen) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="150" fixed="right">
+        <el-table-column label="操作" width="200" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" @click="$router.push(`/servers/${row.id}`)">
               详情
             </el-button>
+            <el-button link type="primary" @click="openEdit(row)">编辑</el-button>
             <el-popconfirm title="确定删除该服务器？" @confirm="handleDelete(row)">
               <template #reference>
                 <el-button link type="danger">删除</el-button>
@@ -72,14 +73,14 @@
       </el-table>
     </el-card>
 
-    <!-- 添加对话框 -->
-    <el-dialog v-model="dialogVisible" title="添加服务器" width="480px">
+    <!-- 添加 / 编辑对话框 -->
+    <el-dialog v-model="dialogVisible" :title="editingId ? '编辑服务器' : '添加服务器'" width="500px">
       <el-form ref="formRef" :model="form" :rules="rules" label-width="90px">
         <el-form-item label="名称" prop="name">
           <el-input v-model="form.name" placeholder="服务器名称" />
         </el-form-item>
         <el-form-item label="IP地址" prop="ip">
-          <el-input v-model="form.ip" />
+          <el-input v-model="form.ip" :disabled="!!editingId" />
         </el-form-item>
         <el-form-item label="系统类型" prop="os_type">
           <el-select v-model="form.os_type" style="width: 100%">
@@ -96,10 +97,27 @@
         <el-form-item label="标签">
           <el-input v-model="form.tags" placeholder="多个标签用逗号分隔" />
         </el-form-item>
+
+        <el-divider content-position="left">只读诊断凭据（AI 连服务器排查用）</el-divider>
+        <el-form-item label="登录用户">
+          <el-input v-model="form.diag_user" placeholder="SSH / WinRM 用户名" />
+        </el-form-item>
+        <el-form-item label="登录密码">
+          <el-input
+            v-model="form.diag_password"
+            type="password"
+            show-password
+            placeholder="SSH / WinRM 密码（留空表示不修改）"
+          />
+        </el-form-item>
+        <el-form-item label="端口">
+          <el-input-number v-model="form.diag_port" :min="1" :max="65535" />
+          <div class="form-tip">Linux SSH 默认 22；Windows WinRM 默认 5985</div>
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
-        <el-button type="primary" :loading="submitting" @click="handleCreate">确定</el-button>
+        <el-button type="primary" :loading="submitting" @click="handleSubmit">确定</el-button>
       </template>
     </el-dialog>
   </div>
@@ -117,16 +135,21 @@ const loading = ref(false)
 const keyword = ref('')
 const dialogVisible = ref(false)
 const submitting = ref(false)
+const editingId = ref(null)
 const formRef = ref(null)
 
-const form = reactive({
+const EMPTY_FORM = {
   name: '',
   ip: '',
   os_type: 'linux',
   os_distro: '',
   os_version: '',
-  tags: ''
-})
+  tags: '',
+  diag_user: '',
+  diag_password: '',
+  diag_port: 22,
+}
+const form = reactive({ ...EMPTY_FORM })
 
 const rules = {
   name: [{ required: true, message: '请输入名称', trigger: 'blur' }],
@@ -149,18 +172,43 @@ async function load() {
   }
 }
 
-async function handleCreate() {
+async function handleSubmit() {
   await formRef.value.validate()
   submitting.value = true
   try {
-    await serverApi.create(form)
-    ElMessage.success('添加成功')
+    if (editingId.value) {
+      // 编辑：密码留空则不要覆盖原值
+      const payload = { ...form }
+      if (!payload.diag_password) delete payload.diag_password
+      await serverApi.update(editingId.value, payload)
+      ElMessage.success('保存成功')
+    } else {
+      await serverApi.create(form)
+      ElMessage.success('添加成功')
+    }
     dialogVisible.value = false
-    Object.assign(form, { name: '', ip: '', os_type: 'linux', os_distro: '', os_version: '', tags: '' })
+    Object.assign(form, EMPTY_FORM)
+    editingId.value = null
     load()
   } finally {
     submitting.value = false
   }
+}
+
+function openEdit(row) {
+  editingId.value = row.id
+  Object.assign(form, EMPTY_FORM, {
+    name: row.name,
+    ip: row.ip,
+    os_type: row.os_type,
+    os_distro: row.os_distro || '',
+    os_version: row.os_version || '',
+    tags: row.tags || '',
+    diag_user: row.diag_user || '',
+    diag_password: '',                 // 出于安全不回显密码, 留空即不修改
+    diag_port: row.diag_port || 22,
+  })
+  dialogVisible.value = true
 }
 
 async function handleDelete(row) {

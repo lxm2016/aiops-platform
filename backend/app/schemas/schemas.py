@@ -36,6 +36,10 @@ class ServerCreate(BaseModel):
     os_distro: str = ""
     os_version: str = ""
     tags: str = ""
+    # 只读诊断凭据 (Linux=SSH / Windows=WinRM), 留空则无法做实时排查
+    diag_user: str = ""
+    diag_password: str = ""
+    diag_port: int = 22
 
 
 class ServerOut(BaseModel):
@@ -53,6 +57,9 @@ class ServerOut(BaseModel):
     last_seen: Optional[datetime]
     tags: str
     created_at: datetime
+    diag_user: str = ""
+    diag_password: str = ""
+    diag_port: int = 22
 
     class Config:
         from_attributes = True
@@ -388,6 +395,8 @@ class NotifyTestIn(BaseModel):
 class ChatRequest(BaseModel):
     message: str
     session_id: str = "default"
+    # 可选：关联一台服务器时, 后端会先做一次【只读】诊断并把结果注入分析上下文
+    server_id: Optional[int] = None
 
 
 class ChatResponse(BaseModel):

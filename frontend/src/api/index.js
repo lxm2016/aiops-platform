@@ -129,9 +129,12 @@ export const settingsApi = {
 export const serverApi = {
   list: (params) => http.get('/servers', { params }),
   create: (data) => http.post('/servers', data),
+  update: (id, data) => http.put(`/servers/${id}`, data),
   remove: (id) => http.delete(`/servers/${id}`),
   metrics: (id, params) => http.get(`/servers/${id}/metrics`, { params, timeout: 60000 }),
   detail: (id) => http.get(`/servers/${id}/detail`),
+  // 只读诊断 + AI 分析 (Linux SSH / Windows WinRM)
+  diagnose: (id) => http.post(`/servers/${id}/diagnose`, null, { timeout: 120000 }),
   summary: () => http.get('/servers/stats/summary')
 }
 
@@ -236,8 +239,8 @@ export const notifyApi = {
 
 // ---------- AI 聊天 ----------
 export const chatApi = {
-  send: (message, session_id = 'default') =>
-    http.post('/chat', { message, session_id }, { timeout: 180000 }),
+  send: (message, session_id = 'default', server_id = null) =>
+    http.post('/chat', { message, session_id, server_id }, { timeout: 180000 }),
   history: (session_id) => http.get(`/chat/history/${session_id}`)
 }
 
