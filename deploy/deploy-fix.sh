@@ -13,6 +13,10 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# 兼容脚本位于 deploy/ 子目录、从任意位置调用的情况：自动上溯到包含 backend/ 的包根目录
+if [ ! -d "$SCRIPT_DIR/backend" ] && [ -d "$SCRIPT_DIR/../backend" ]; then
+    SCRIPT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+fi
 DST="${AIOPS_DST:-/opt/aiops-deploy}"
 TS="$(date +%F_%H%M%S)"
 
