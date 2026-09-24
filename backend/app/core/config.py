@@ -17,7 +17,9 @@ class Settings(BaseSettings):
     algorithm: str = "HS256"
     access_token_expire_minutes: int = 1440
 
-    # Qwen LLM (OpenAI-compatible API, e.g. vLLM / Ollama / Xinference)
+    # LLM provider: 多提供商支持 (本地 Ollama / 本地 OpenAI 兼容 / OpenAI / DeepSeek / 通义千问 / Kimi / 智谱 / 自定义)
+    # 取值见 app/services/llm_service.py 的 PROVIDERS 注册表 key
+    llm_provider: str = "openai_compatible"
     llm_base_url: str = "http://localhost:8000/v1"
     llm_api_key: str = "EMPTY"
     llm_model: str = "qwen2.5"

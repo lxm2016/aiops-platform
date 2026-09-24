@@ -7,6 +7,10 @@
             <el-icon color="#00d4ff" :size="20"><ChatDotRound /></el-icon>
             AI 运维助手
             <el-tag size="small" type="primary" effect="plain">基于实时监控上下文</el-tag>
+            <el-tag v-if="activeProvider" size="small" type="success" effect="dark">
+              <el-icon style="vertical-align:middle"><Connection /></el-icon>&nbsp;{{ activeProvider }}
+            </el-tag>
+            <el-tag v-else size="small" type="warning" effect="plain">未配置模型</el-tag>
           </div>
           <div class="chat-actions">
             <el-button link type="primary" @click="openLlmDialog">
@@ -84,21 +88,84 @@
       </div>
     </el-card>
 
-    <!-- 模型配置对话框 -->
-    <el-dialog v-model="llmVisible" title="AI 模型配置（内网千问大模型）" width="520px">
+    <!-- 模型配置对话框（多提供商） -->
+    <el-dialog v-model="llmVisible" title="AI 模型配置" width="580px">
       <el-form :model="llmForm" label-width="100px">
+        <el-form-item label="提供商" required>
+          <el-select
+            v-model="llmForm.provider"
+            placeholder="选择模型提供商"
+            style="width: 100%"
+            @change="onProviderChange"
+          >
+            <el-option-group
+              v-for="grp in providerGroups"
+              :key="grp"
+              :label="grp"
+            >
+              <el-option
+                v-for="p in providersByGroup(grp)"
+                :key="p.key"
+                :label="p.label"
+                :value="p.key"
+              >
+                <span>{{ p.label }}</span>
+                <span style="float: right; color: #8aa; font-size: 12px">
+                  {{ p.needs_key ? '需 Key' : '免 Key' }}
+                </span>
+              </el-option>
+            </el-option-group>
+          </el-select>
+          <div class="form-tip">{{ currentProv.doc }}</div>
+        </el-form-item>
+
         <el-form-item label="服务地址" required>
           <el-input
             v-model="llmForm.base_url"
-            placeholder="http://模型服务器IP:端口/v1"
+            :placeholder="currentProv.default_base_url"
           />
-          <div class="form-tip">OpenAI 兼容接口地址，如 vLLM/Ollama/Xinference 的 /v1 地址</div>
+          <div class="form-tip">OpenAI 兼容接口地址（/v1）。本地如 Ollama/vLLM，在线如各厂商云地址。</div>
         </el-form-item>
+
+        <el-form-item label="API Key" :required="currentProv.needs_key">
+          <el-input
+            v-model="llmForm.api_key"
+            :placeholder="currentProv.key_placeholder"
+          />
+          <div v-if="!currentProv.needs_key" class="form-tip">
+            该提供商无需密钥，留空或保持 EMPTY 即可。
+          </div>
+        </el-form-item>
+
         <el-form-item label="模型名称" required>
-          <el-input v-model="llmForm.model" placeholder="如 qwen2.5:7b / Qwen2.5-7B-Instruct" />
-        </el-form-item>
-        <el-form-item label="API Key">
-          <el-input v-model="llmForm.api_key" placeholder="无鉴权填 EMPTY" />
+          <el-select
+            v-model="llmForm.model"
+            filterable
+            allow-create
+            default-first-option
+            :placeholder="currentProv.model_example"
+            style="width: 100%"
+            :loading="modelsLoading"
+          >
+            <el-option
+              v-for="m in modelOptions"
+              :key="m"
+              :label="m"
+              :value="m"
+            />
+          </el-select>
+          <div class="form-tip">
+            <el-button
+              link
+              type="primary"
+              size="small"
+              :loading="modelsLoading"
+              @click="handleFetchModels"
+            >
+              <el-icon><Refresh /></el-icon>&nbsp;获取模型列表
+            </el-button>
+            从服务拉取可用模型，也可直接输入自定义名称。
+          </div>
         </el-form-item>
       </el-form>
       <template #footer>
@@ -111,7 +178,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, nextTick, onMounted } from 'vue'
+import { ref, reactive, computed, nextTick, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { chatApi, settingsApi } from '@/api'
 import { formatTime } from '@/utils/format'
@@ -189,16 +256,99 @@ async function handleClear() {
   ElMessage.success('会话已清空')
 }
 
-// ---------- 模型配置 ----------
+// ---------- 模型配置（多提供商） ----------
 const llmVisible = ref(false)
 const llmSaving = ref(false)
 const llmTesting = ref(false)
-const llmForm = reactive({ base_url: '', model: '', api_key: 'EMPTY' })
+const activeProvider = ref('')          // 当前激活的提供商显示名
+const providers = ref([])               // 提供商注册表 (来自后端)
+const modelOptions = ref([])            // "获取模型列表" 拉到的模型
+const modelsLoading = ref(false)
+const appliedDefaultUrl = ref('')       // 上次随提供商自动填入的 base_url, 用于判断是否可被覆盖
+const llmForm = reactive({
+  provider: 'openai_compatible',
+  base_url: '',
+  model: '',
+  api_key: 'EMPTY'
+})
+
+// 提供商分组 (保持注册表顺序)
+const providerGroups = computed(() => {
+  const seen = []
+  for (const p of providers.value) {
+    if (!seen.includes(p.group)) seen.push(p.group)
+  }
+  return seen
+})
+function providersByGroup(grp) {
+  return providers.value.filter((p) => p.group === grp)
+}
+// 当前所选提供商元数据
+const currentProv = computed(() => {
+  const p = providers.value.find((x) => x.key === llmForm.provider)
+  return p || {
+    label: '',
+    doc: '',
+    needs_key: false,
+    key_placeholder: '无鉴权填 EMPTY',
+    default_base_url: 'http://localhost:8000/v1',
+    model_example: 'model-name'
+  }
+})
+
+// 切换提供商: 仅当用户未手动改过地址时, 自动回填该提供商的默认地址
+function onProviderChange() {
+  const def = currentProv.value.default_base_url
+  if (!llmForm.base_url || llmForm.base_url === appliedDefaultUrl.value) {
+    llmForm.base_url = def
+  }
+  appliedDefaultUrl.value = def
+  // 免 Key 的本地服务, 清空密钥占位
+  if (!currentProv.value.needs_key) {
+    llmForm.api_key = 'EMPTY'
+  }
+  modelOptions.value = []
+}
+
+async function handleFetchModels() {
+  if (!llmForm.base_url) {
+    ElMessage.warning('请先填写服务地址')
+    return
+  }
+  modelsLoading.value = true
+  try {
+    const res = await settingsApi.models({
+      provider: llmForm.provider,
+      base_url: llmForm.base_url,
+      api_key: llmForm.api_key || 'EMPTY'
+    })
+    if (res.ok) {
+      modelOptions.value = res.models || []
+      ElMessage.success(res.detail || `已拉取 ${modelOptions.value.length} 个模型`)
+    } else {
+      ElMessage.error(res.detail || '拉取模型列表失败')
+    }
+  } catch (e) {
+    ElMessage.error('拉取模型列表失败，请检查地址与网络')
+  } finally {
+    modelsLoading.value = false
+  }
+}
 
 async function openLlmDialog() {
   try {
-    const cfg = await settingsApi.getLlm()
+    const [cfg, provs] = await Promise.all([
+      settingsApi.getLlm(),
+      settingsApi.providers()
+    ])
+    providers.value = provs || []
     Object.assign(llmForm, cfg)
+    if (!llmForm.api_key) llmForm.api_key = 'EMPTY'
+    // 记录当前默认地址, 供切换时判断
+    const p = providers.value.find((x) => x.key === llmForm.provider)
+    appliedDefaultUrl.value = p ? p.default_base_url : ''
+    const label = p ? p.label : (cfg.provider || '')
+    activeProvider.value = label
   } catch (e) {
     /* 忽略, 保持默认 */
   }
@@ -221,6 +371,10 @@ async function handleTestLlm() {
 }
 
 async function handleSaveLlm() {
+  if (!llmForm.provider) {
+    ElMessage.warning('请选择提供商')
+    return
+  }
   if (!llmForm.base_url || !llmForm.model) {
     ElMessage.warning('服务地址和模型名称不能为空')
     return
@@ -228,6 +382,8 @@ async function handleSaveLlm() {
   llmSaving.value = true
   try {
     await settingsApi.saveLlm(llmForm)
+    const p = providers.value.find((x) => x.key === llmForm.provider)
+    activeProvider.value = p ? p.label : llmForm.provider
     ElMessage.success('模型配置已保存，立即生效')
     llmVisible.value = false
   } finally {

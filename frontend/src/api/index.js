@@ -114,11 +114,15 @@ export const authApi = {
   changePassword: (data) => http.post('/auth/change-password', data)
 }
 
-// ---------- 系统设置 (AI模型) ----------
+// ---------- 系统设置 (AI模型 / 多提供商) ----------
 export const settingsApi = {
   getLlm: () => http.get('/settings/llm'),
   saveLlm: (data) => http.put('/settings/llm', data),
-  testLlm: (data) => http.post('/settings/llm/test', data, { timeout: 60000 })
+  testLlm: (data) => http.post('/settings/llm/test', data, { timeout: 60000 }),
+  // 提供商注册表 (下拉选项, 不含密钥)
+  providers: () => http.get('/settings/llm/providers'),
+  // 拉取某 endpoint 可用模型列表
+  models: (data) => http.post('/settings/llm/models', data, { timeout: 30000 })
 }
 
 // ---------- 服务器 ----------

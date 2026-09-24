@@ -11,8 +11,16 @@ class ChangePasswordRequest(BaseModel):
 
 
 class LlmConfigIn(BaseModel):
+    provider: str = "openai_compatible"   # 见 llm_service.PROVIDERS 的 key
     base_url: str
     model: str
+    api_key: str = "EMPTY"
+
+
+class LlmModelsIn(BaseModel):
+    """拉取某 endpoint 可用模型列表的请求。"""
+    provider: str = "openai_compatible"
+    base_url: str
     api_key: str = "EMPTY"
 
 

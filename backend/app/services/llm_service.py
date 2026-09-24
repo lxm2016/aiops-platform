@@ -1,4 +1,11 @@
-"""Qwen LLM integration via OpenAI-compatible API (vLLM/Ollama/Xinference).
+"""LLM 集成：支持多种本地 / 在线大模型 (OpenAI 兼容协议)。
+
+提供商 (provider) 一览见下方 PROVIDERS 注册表。所有 provider 都通过统一的
+OpenAI 兼容 /v1 接口对接 (Ollama 也走其 OpenAI 兼容模式), 因此后端只需维护
+一个 AsyncOpenAI 客户端, 不同 provider 的差异仅在:
+  - 默认 base_url (本地地址 vs 在线云地址)
+  - 是否需要 API Key (本地服务通常无鉴权)
+  - 模型列表如何拉取 (OpenAI 兼容走 /models, Ollama 走 /api/tags)
 
 LLM 配置支持运行时修改: 数据库 system_config 表优先, 未配置时回退 .env 默认值。
 前端在 AI 助手页面的"模型配置"中修改, 保存后立即生效, 无需重启服务。
@@ -12,8 +19,159 @@ from app.core.config import get_settings
 
 settings = get_settings()
 
+
+# ---------------------------------------------------------------------------
+# 提供商注册表
+#   前端"模型配置"对话框按此渲染下拉选项, 选择后自动回填 base_url / api_key 提示。
+#   不包含任何密钥, 可安全下发给浏览器。
+#   models_mode: "openai" -> GET {base_url}/models ; "ollama" -> GET {root}/api/tags
+# ---------------------------------------------------------------------------
+PROVIDERS: dict = {
+    "local_ollama": {
+        "label": "本地 Ollama",
+        "group": "本地部署",
+        "kind": "ollama",
+        "models_mode": "ollama",
+        "default_base_url": "http://localhost:11434/v1",
+        "needs_key": False,
+        "key_placeholder": "本地服务无需密钥，填 EMPTY 或不填",
+        "model_example": "qwen2.5:7b",
+        "doc": "本机运行的 Ollama，默认地址 http://localhost:11434/v1（OpenAI 兼容模式）。"
+               "模型列表通过 Ollama 原生 /api/tags 自动拉取。",
+    },
+    "local_openai": {
+        "label": "本地 OpenAI 兼容 (vLLM / Xinference / LM Studio)",
+        "group": "本地部署",
+        "kind": "openai_compatible",
+        "models_mode": "openai",
+        "default_base_url": "http://localhost:8000/v1",
+        "needs_key": False,
+        "key_placeholder": "无鉴权填 EMPTY",
+        "model_example": "qwen2.5-7b-instruct",
+        "doc": "自托管的 OpenAI 兼容推理服务，如 vLLM、Xinference、LM Studio。"
+               "模型列表通过 /models 自动拉取。",
+    },
+    "openai": {
+        "label": "OpenAI (GPT)",
+        "group": "在线大模型",
+        "kind": "openai_compatible",
+        "models_mode": "openai",
+        "default_base_url": "https://api.openai.com/v1",
+        "needs_key": True,
+        "key_placeholder": "sk-...（必填）",
+        "model_example": "gpt-4o-mini",
+        "doc": "OpenAI 官方 API，需要 API Key。",
+    },
+    "deepseek": {
+        "label": "DeepSeek",
+        "group": "在线大模型",
+        "kind": "openai_compatible",
+        "models_mode": "openai",
+        "default_base_url": "https://api.deepseek.com/v1",
+        "needs_key": True,
+        "key_placeholder": "sk-...（必填）",
+        "model_example": "deepseek-chat",
+        "doc": "DeepSeek 官方 API，base_url 为 https://api.deepseek.com/v1。",
+    },
+    "qwen": {
+        "label": "通义千问 (阿里云百炼 DashScope)",
+        "group": "在线大模型",
+        "kind": "openai_compatible",
+        "models_mode": "openai",
+        "default_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "needs_key": True,
+        "key_placeholder": "sk-...（必填，DashScope API Key）",
+        "model_example": "qwen-plus",
+        "doc": "阿里云百炼平台，使用兼容模式地址。模型如 qwen-plus / qwen-max / qwen2.5-7b-instruct。",
+    },
+    "moonshot": {
+        "label": "Moonshot (Kimi)",
+        "group": "在线大模型",
+        "kind": "openai_compatible",
+        "models_mode": "openai",
+        "default_base_url": "https://api.moonshot.cn/v1",
+        "needs_key": True,
+        "key_placeholder": "sk-...（必填）",
+        "model_example": "moonshot-v1-8k",
+        "doc": "月之暗面 Kimi 开放平台 API。",
+    },
+    "zhipu": {
+        "label": "智谱 GLM",
+        "group": "在线大模型",
+        "kind": "openai_compatible",
+        "models_mode": "openai",
+        "default_base_url": "https://open.bigmodel.cn/api/paas/v4",
+        "needs_key": True,
+        "key_placeholder": "sk-...（必填）",
+        "model_example": "glm-4-flash",
+        "doc": "智谱 AI 开放平台，base_url 为 https://open.bigmodel.cn/api/paas/v4。",
+    },
+    "custom": {
+        "label": "自定义 / 其他 OpenAI 兼容",
+        "group": "其他",
+        "kind": "openai_compatible",
+        "models_mode": "openai",
+        "default_base_url": "http://localhost:8000/v1",
+        "needs_key": False,
+        "key_placeholder": "按需填写，无鉴权填 EMPTY",
+        "model_example": "your-model",
+        "doc": "任意兼容 OpenAI /v1 协议的推理服务，手动填写地址与模型。",
+    },
+}
+
+
+def get_providers() -> List[dict]:
+    """返回提供商列表 (含分组), 供前端渲染下拉。不含任何密钥。"""
+    out: List[dict] = []
+    for key, p in PROVIDERS.items():
+        out.append({
+            "key": key,
+            "label": p["label"],
+            "group": p["group"],
+            "needs_key": p["needs_key"],
+            "default_base_url": p["default_base_url"],
+            "key_placeholder": p["key_placeholder"],
+            "model_example": p["model_example"],
+            "doc": p["doc"],
+        })
+    return out
+
+
+async def list_models(provider: str, base_url: str, api_key: str) -> List[str]:
+    """拉取指定 endpoint 上可用的模型列表。
+
+    - OpenAI 兼容: GET {base_url}/models (带 Bearer 鉴权)
+    - Ollama:      GET {root}/api/tags   (root = 去掉末尾 /v1)
+    失败抛出带说明的异常, 由调用方包装成 {ok, detail}。
+    """
+    prov = PROVIDERS.get(provider, PROVIDERS["custom"])
+    base = (base_url or "").strip().rstrip("/")
+    if not base:
+        raise ValueError("服务地址 (base_url) 为空，无法拉取模型列表")
+
+    if prov["models_mode"] == "ollama":
+        root = base[:-3] if base.endswith("/v1") else base
+        url = f"{root}/api/tags"
+        async with httpx.AsyncClient(trust_env=False, timeout=20.0) as c:
+            r = await c.get(url)
+            r.raise_for_status()
+            data = r.json()
+        return [m.get("name", "") for m in data.get("models", []) if m.get("name")]
+    else:
+        url = f"{base}/models"
+        headers = {}
+        if api_key and api_key != "EMPTY":
+            headers["Authorization"] = f"Bearer {api_key}"
+        async with httpx.AsyncClient(trust_env=False, timeout=20.0) as c:
+            r = await c.get(url, headers=headers)
+            r.raise_for_status()
+            data = r.json()
+        return [m.get("id", "") for m in data.get("data", []) if m.get("id")]
+
+
 # 运行时生效的LLM配置 (由 reload_config 从数据库刷新)
 _runtime = {
+    "provider": settings.llm_provider,
     "base_url": settings.llm_base_url,
     "model": settings.llm_model,
     "api_key": settings.llm_api_key,
@@ -47,6 +205,7 @@ async def reload_config():
     async with AsyncSessionLocal() as db:
         rows = (await db.execute(select(SystemConfig))).scalars().all()
     stored = {r.key: r.value for r in rows}
+    _runtime["provider"] = stored.get("llm_provider") or settings.llm_provider
     _runtime["base_url"] = stored.get("llm_base_url") or settings.llm_base_url
     _runtime["model"] = stored.get("llm_model") or settings.llm_model
     _runtime["api_key"] = stored.get("llm_api_key") or settings.llm_api_key
@@ -118,7 +277,8 @@ async def chat_completion(
         )
         return resp.choices[0].message.content or "（模型未返回内容）"
     except Exception as e:
-        return f"无法连接内网大模型服务（{_runtime['base_url']}）：{e}\n请确认千问模型服务已启动。"
+        prov = PROVIDERS.get(_runtime["provider"], {}).get("label", "大模型")
+        return f"无法连接【{prov}】服务（{_runtime['base_url']}）：{e}\n请确认模型服务已启动且地址/模型名正确。"
 
 
 async def test_connection(base_url: str, api_key: str, model: str) -> Tuple[bool, str]:
