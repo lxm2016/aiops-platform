@@ -59,11 +59,18 @@ echo "  后端代码更新完成"
 
 # ---------------------------------------------------------------------------
 # 只读服务器诊断依赖 (paramiko / pywinrm) —— 离线安装
-# 内网服务器多半无外网, 包内已随附 cp311 manylinux 离线 wheel。
+# 内网服务器多半无外网, 包内已随附 manylinux 离线 wheel。
+# 按 venv 的 Python 版本自动选 cp311 / cp312, 避免版本不匹配装不上。
 DIAG_WHEELS="$SCRIPT_DIR/backend/packages/diag-wheels"
+if [ -x "$DST/backend/venv/bin/python" ]; then
+    PYVER=$("$DST/backend/venv/bin/python" -c "import sys; print('%d.%d' % sys.version_info[:2])" 2>/dev/null)
+    if [ "$PYVER" = "3.12" ] && [ -d "$SCRIPT_DIR/backend/packages/diag-wheels-py312" ]; then
+        DIAG_WHEELS="$SCRIPT_DIR/backend/packages/diag-wheels-py312"
+    fi
+fi
 if [ -d "$DIAG_WHEELS" ] && [ -x "$DST/backend/venv/bin/python" ]; then
     echo ""
-    echo "  [3b] 安装只读诊断依赖 (paramiko / pywinrm, 离线)..."
+    echo "  [3b] 安装只读诊断依赖 (paramiko / pywinrm, 离线, python ${PYVER:-?})..."
     if "$DST/backend/venv/bin/python" -m pip install --no-index --find-links "$DIAG_WHEELS" paramiko pywinrm >/dev/null 2>&1; then
         echo "    诊断依赖安装完成 (智能诊断功能可用)"
     else
@@ -71,7 +78,7 @@ if [ -d "$DIAG_WHEELS" ] && [ -x "$DST/backend/venv/bin/python" ]; then
         echo "           可手动在 venv 中执行: $DST/backend/venv/bin/python -m pip install paramiko pywinrm"
     fi
 else
-    echo "  [提示] 包内未含 diag-wheels, 跳过诊断依赖安装 (智能诊断功能受限)"
+    echo "  [提示] 包内未含诊断依赖 wheel, 跳过诊断依赖安装 (智能诊断功能受限)"
 fi
 
 # ---------------------------------------------------------------------------

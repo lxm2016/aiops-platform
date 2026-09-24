@@ -74,7 +74,7 @@ def _run_linux(server: Server) -> Dict:
     try:
         import paramiko
     except ImportError:
-        return {"ok": False, "error": "后端未安装 paramiko，无法 SSH 诊断。请执行: pip install paramiko"}
+        return {"ok": False, "error": "后端 venv 未安装 paramiko，无法 SSH 诊断。请用后端 venv 的 pip 安装（勿用系统 pip，Debian/Ubuntu 会报 externally-managed）：{venv}/bin/pip install paramiko pywinrm —— 离线 wheel 随包附于 backend/packages/diag-wheels(-py312)"}
 
     port = server.diag_port or 22
     try:
@@ -116,7 +116,7 @@ def _run_windows(server: Server) -> Dict:
     try:
         import winrm
     except ImportError:
-        return {"ok": False, "error": "后端未安装 pywinrm，无法 WinRM 诊断。请执行: pip install pywinrm"}
+        return {"ok": False, "error": "后端 venv 未安装 pywinrm，无法 WinRM 诊断。请用后端 venv 的 pip 安装（勿用系统 pip，Debian/Ubuntu 会报 externally-managed）：{venv}/bin/pip install paramiko pywinrm —— 离线 wheel 随包附于 backend/packages/diag-wheels(-py312)"}
 
     port = server.diag_port or 5985
     try:
