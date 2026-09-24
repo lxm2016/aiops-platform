@@ -288,11 +288,16 @@ async def dump_table(engine, target, auth, ctx, table_oid, max_col=40, label="")
             except (TypeError, ValueError):
                 nums = []
                 break
-        # 数值列且量级大 -> 很可能是容量
+        # 数值列且量级大 -> 很可能是容量; 但**先识别无效哨兵值**
+        # 真机踩过: Dorado 5600 V6 的 LUN 表 .6/.10 恒为 4294967295(0xFFFFFFFF),
+        # 那是"该字段本型号不支持"的占位, 不是容量 —— 不识别就会被当容量误报。
         hint = ""
         if nums:
             mx = max(nums)
-            if mx >= 10 ** 7:
+            sentinels = {2 ** 32 - 1, 2 ** 31 - 1, 2 ** 64 - 1}
+            if all(n in sentinels for n in nums):
+                hint = "  <== 全为无效哨兵值(0xFFFFFFFF/0x7FFFFFFF), 该字段未实现"
+            elif mx >= 10 ** 7:
                 hint = "  <== 数值很大, 像容量(B/KB/扇区口径需再判)"
             elif mx <= 100:
                 hint = "  <== 0~100, 像百分比/状态码"
