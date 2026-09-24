@@ -54,14 +54,37 @@ find "$DST/backend/app" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/nul
 echo "  后端代码更新完成"
 
 # ---------------------------------------------------------------------------
+# 只读服务器诊断依赖 (paramiko / pywinrm) —— 离线安装
+# 内网服务器多半无外网, 包内已随附 cp311 manylinux 离线 wheel。
+DIAG_WHEELS="$SCRIPT_DIR/backend/packages/diag-wheels"
+if [ -d "$DIAG_WHEELS" ] && [ -x "$DST/backend/venv/bin/python" ]; then
+    echo ""
+    echo "  [3b] 安装只读诊断依赖 (paramiko / pywinrm, 离线)..."
+    if "$DST/backend/venv/bin/python" -m pip install --no-index --find-links "$DIAG_WHEELS" paramiko pywinrm >/dev/null 2>&1; then
+        echo "    诊断依赖安装完成 (智能诊断功能可用)"
+    else
+        echo "    [警告] 离线安装诊断依赖失败, 仅『智能诊断』功能受限 (其余功能不受影响)"
+        echo "           可手动在 venv 中执行: $DST/backend/venv/bin/python -m pip install paramiko pywinrm"
+    fi
+else
+    echo "  [提示] 包内未含 diag-wheels, 跳过诊断依赖安装 (智能诊断功能受限)"
+fi
+
+# ---------------------------------------------------------------------------
 echo ""
 echo "[4/9] 更新前端..."
+FRONTEND_SRC=""
 if [ -d "$SCRIPT_DIR/frontend-dist" ]; then
+    FRONTEND_SRC="$SCRIPT_DIR/frontend-dist"
+elif [ -d "$SCRIPT_DIR/frontend/dist" ]; then
+    FRONTEND_SRC="$SCRIPT_DIR/frontend/dist"
+fi
+if [ -n "$FRONTEND_SRC" ]; then
     rm -rf "$DST/frontend-dist"
-    cp -r "$SCRIPT_DIR/frontend-dist" "$DST/"
-    echo "  前端更新完成"
+    cp -r "$FRONTEND_SRC" "$DST/frontend-dist"
+    echo "  前端更新完成 (来源: $FRONTEND_SRC)"
 else
-    echo "  [提示] 包内未包含 frontend-dist, 跳过前端更新"
+    echo "  [提示] 包内未包含前端构建产物, 跳过前端更新"
 fi
 
 # ---------------------------------------------------------------------------
