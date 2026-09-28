@@ -24,6 +24,15 @@ class LlmModelsIn(BaseModel):
     api_key: str = "EMPTY"
 
 
+class LlmProfileIn(BaseModel):
+    """一套可保存、可一键切换的 LLM 配置（命名配置）。"""
+    name: str
+    provider: str = "openai_compatible"
+    base_url: str
+    model: str
+    api_key: str = "EMPTY"
+
+
 class PortRemarkIn(BaseModel):
     remark: str = ""
 

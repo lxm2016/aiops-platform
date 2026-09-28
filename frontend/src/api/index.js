@@ -122,7 +122,14 @@ export const settingsApi = {
   // 提供商注册表 (下拉选项, 不含密钥)
   providers: () => http.get('/settings/llm/providers'),
   // 拉取某 endpoint 可用模型列表
-  models: (data) => http.post('/settings/llm/models', data, { timeout: 30000 })
+  models: (data) => http.post('/settings/llm/models', data, { timeout: 30000 }),
+  // 多套命名配置: 列表 / 保存 / 一键切换 / 删除
+  llmProfiles: () => http.get('/settings/llm/profiles'),
+  saveProfile: (data) => http.post('/settings/llm/profiles', data, { timeout: 60000 }),
+  activateProfile: (name) =>
+    http.post(`/settings/llm/profiles/${encodeURIComponent(name)}/activate`, null),
+  deleteProfile: (name) =>
+    http.delete(`/settings/llm/profiles/${encodeURIComponent(name)}`)
 }
 
 // ---------- 服务器 ----------
@@ -137,6 +144,8 @@ export const serverApi = {
   diagnose: (id) => http.post(`/servers/${id}/diagnose`, null, { timeout: 120000 }),
   // 快速测试诊断凭据能否连上 (可用表单里未保存的密码)
   testConn: (id, data) => http.post(`/servers/${id}/test-connection`, data, { timeout: 30000 }),
+  // 点击"进程数"卡片下钻: 只读列出资源占用 TOP 进程
+  processList: (id) => http.get(`/servers/${id}/process-list`, { timeout: 60000 }),
   summary: () => http.get('/servers/stats/summary')
 }
 

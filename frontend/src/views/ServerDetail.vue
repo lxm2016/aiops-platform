@@ -79,7 +79,8 @@
         <StatCard label="磁盘使用率" :value="latest.disk_percent.toFixed(1)" unit="%" icon="Box" :color="percentColor(latest.disk_percent)" />
       </el-col>
       <el-col :span="6">
-        <StatCard label="进程数" :value="latest.process_count" icon="List" color="#9b6bff" />
+        <StatCard class="proc-card" label="进程数" :value="latest.process_count" icon="List"
+                  color="#9b6bff" @click="openProcessList" />
       </el-col>
     </el-row>
 
@@ -174,6 +175,47 @@
         </template>
       </div>
     </el-drawer>
+
+    <!-- 进程列表下钻（只读快照） -->
+    <el-dialog v-model="procVisible" title="进程列表（只读快照）" width="780px" top="6vh"
+               :destroy-on-close="true">
+      <div v-loading="procLoading">
+        <el-alert type="info" :closable="false" show-icon
+          :title="`TOP 20 进程 (${procResult?.os_type === 'windows' ? 'Windows' : 'Linux'}${procResult?.host ? ' · ' + procResult.host : ''})`"
+          :description="procResult?.os_type === 'windows'
+            ? '资源占用为实时快照；Windows 的 CPU 列为进程累计 CPU 时间(秒)，非实时占比。'
+            : '资源占用为实时快照（ps 单点采集）；全部操作只读，未做任何修改。'"
+          style="margin-bottom: 14px" />
+        <el-alert v-if="procResult && !procResult.ok" type="error" :closable="false"
+          :title="procResult.error" style="margin-bottom: 14px" />
+        <el-table v-if="procResult && procResult.ok" :data="procResult.processes" size="small"
+          border max-height="460" empty-text="未取到进程">
+          <el-table-column prop="pid" label="PID" width="90" />
+          <el-table-column prop="name" label="名称" min-width="160" show-overflow-tooltip />
+          <template v-if="procResult.os_type === 'linux'">
+            <el-table-column prop="user" label="用户" width="120" show-overflow-tooltip />
+            <el-table-column label="CPU%" width="90">
+              <template #default="{ row }">{{ row.cpu != null ? row.cpu + '%' : '-' }}</template>
+            </el-table-column>
+            <el-table-column label="内存%" width="90">
+              <template #default="{ row }">{{ row.mem != null ? row.mem + '%' : '-' }}</template>
+            </el-table-column>
+          </template>
+          <template v-else>
+            <el-table-column label="CPU(秒)" width="110">
+              <template #default="{ row }">{{ row.cpu_seconds != null ? row.cpu_seconds : '-' }}</template>
+            </el-table-column>
+          </template>
+          <el-table-column label="内存占用" width="120">
+            <template #default="{ row }">{{ row.rss_mb != null ? row.rss_mb + ' MB' : '-' }}</template>
+          </el-table-column>
+        </el-table>
+      </div>
+      <template #footer>
+        <el-button @click="procVisible = false">关闭</el-button>
+        <el-button type="primary" :loading="procLoading" @click="openProcessList">刷新</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -414,6 +456,26 @@ async function openDiagnose() {
   }
 }
 
+// ---------- 进程列表下钻（只读快照） ----------
+const procVisible = ref(false)
+const procLoading = ref(false)
+const procResult = ref(null)
+
+async function openProcessList() {
+  procVisible.value = true
+  procResult.value = null
+  procLoading.value = true
+  try {
+    const res = await serverApi.processList(serverId)
+    procResult.value = res
+    if (!res.ok) ElMessage.error(res.error || '获取进程列表失败')
+  } catch (e) {
+    ElMessage.error('获取进程列表失败，请检查后端日志')
+  } finally {
+    procLoading.value = false
+  }
+}
+
 onMounted(loadAll)
 </script>
 
@@ -446,6 +508,13 @@ onMounted(loadAll)
   color: #9fb3d1;
   max-height: 360px;
   overflow: auto;
+}
+
+:deep(.proc-card) {
+  cursor: pointer;
+}
+:deep(.proc-card:hover) {
+  border-color: #9b6bff;
 }
 </style>
 

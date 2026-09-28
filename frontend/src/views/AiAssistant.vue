@@ -7,7 +7,10 @@
             <el-icon color="#00d4ff" :size="20"><ChatDotRound /></el-icon>
             AI 运维助手
             <el-tag size="small" type="primary" effect="plain">基于实时监控上下文</el-tag>
-            <el-tag v-if="activeProvider" size="small" type="success" effect="dark">
+            <el-tag v-if="activeProfile" size="small" type="success" effect="dark">
+              <el-icon style="vertical-align:middle"><Connection /></el-icon>&nbsp;{{ activeProfile }}
+            </el-tag>
+            <el-tag v-else-if="activeProvider" size="small" type="success" effect="dark">
               <el-icon style="vertical-align:middle"><Connection /></el-icon>&nbsp;{{ activeProvider }}
             </el-tag>
             <el-tag v-else size="small" type="warning" effect="plain">未配置模型</el-tag>
@@ -186,10 +189,50 @@
           </div>
         </el-form-item>
       </el-form>
+
+      <el-divider content-position="left">已保存配置（可一键切换）</el-divider>
+      <el-form label-width="100px">
+        <el-form-item label="已保存配置">
+          <el-select
+            v-model="selectedProfile"
+            placeholder="选择已保存配置，立即切换为该模型"
+            style="width: 100%"
+            @change="onProfilePick"
+          >
+            <el-option
+              v-for="p in profiles"
+              :key="p.name"
+              :label="`${p.name}（${providerLabel(p.provider)} / ${p.model}）`"
+              :value="p.name"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="配置名称">
+          <el-input
+            v-model="profileName"
+            placeholder="保存时用的名称（留空自动取提供商名）"
+          />
+          <div class="form-tip">
+            保存后会立即生效；之后可在上方下拉里一键切换回该配置。
+          </div>
+        </el-form-item>
+        <el-form-item>
+          <el-button
+            size="small"
+            type="danger"
+            plain
+            :disabled="!selectedProfile"
+            @click="handleDeleteProfile"
+          >
+            删除该配置
+          </el-button>
+        </el-form-item>
+      </el-form>
+
       <template #footer>
         <el-button :loading="llmTesting" @click="handleTestLlm">测试连接</el-button>
         <el-button @click="llmVisible = false">取消</el-button>
-        <el-button type="primary" :loading="llmSaving" @click="handleSaveLlm">保存</el-button>
+        <el-button type="primary" :loading="llmSaving" @click="handleSaveLlm">保存配置</el-button>
       </template>
     </el-dialog>
   </div>
@@ -284,12 +327,16 @@ async function handleClear() {
   ElMessage.success('会话已清空')
 }
 
-// ---------- 模型配置（多提供商） ----------
+// ---------- 模型配置（多提供商 + 多套命名配置） ----------
 const llmVisible = ref(false)
 const llmSaving = ref(false)
 const llmTesting = ref(false)
 const activeProvider = ref('')          // 当前激活的提供商显示名
+const activeProfile = ref('')           // 当前生效的命名配置名
 const providers = ref([])               // 提供商注册表 (来自后端)
+const profiles = ref([])                // 已保存的命名配置列表
+const selectedProfile = ref('')         // 下拉当前选中的配置名
+const profileName = ref('')             // 保存时填的名称
 const modelOptions = ref([])            // "获取模型列表" 拉到的模型
 const modelsLoading = ref(false)
 const appliedDefaultUrl = ref('')       // 上次随提供商自动填入的 base_url, 用于判断是否可被覆盖
@@ -299,6 +346,11 @@ const llmForm = reactive({
   model: '',
   api_key: 'EMPTY'
 })
+
+function providerLabel(key) {
+  const p = providers.value.find((x) => x.key === key)
+  return p ? p.label : (key || '')
+}
 
 // 提供商分组 (保持注册表顺序)
 const providerGroups = computed(() => {
@@ -365,9 +417,10 @@ async function handleFetchModels() {
 
 async function openLlmDialog() {
   try {
-    const [cfg, provs] = await Promise.all([
+    const [cfg, provs, profileRes] = await Promise.all([
       settingsApi.getLlm(),
-      settingsApi.providers()
+      settingsApi.providers(),
+      settingsApi.llmProfiles()
     ])
     providers.value = provs || []
     Object.assign(llmForm, cfg)
@@ -375,12 +428,72 @@ async function openLlmDialog() {
     // 记录当前默认地址, 供切换时判断
     const p = providers.value.find((x) => x.key === llmForm.provider)
     appliedDefaultUrl.value = p ? p.default_base_url : ''
-    const label = p ? p.label : (cfg.provider || '')
-    activeProvider.value = label
+    activeProvider.value = p ? p.label : (cfg.provider || '')
+    // 已保存配置 + 当前生效配置名
+    profiles.value = (profileRes && profileRes.profiles) || []
+    activeProfile.value = (profileRes && profileRes.active) || ''
+    selectedProfile.value = activeProfile.value
+    profileName.value = activeProfile.value
   } catch (e) {
     /* 忽略, 保持默认 */
   }
   llmVisible.value = true
+}
+
+async function refreshProfiles() {
+  try {
+    const res = await settingsApi.llmProfiles()
+    profiles.value = (res && res.profiles) || []
+    activeProfile.value = (res && res.active) || activeProfile.value
+  } catch (e) {
+    /* 忽略 */
+  }
+}
+
+async function onProfilePick(name) {
+  if (!name) return
+  try {
+    const res = await settingsApi.activateProfile(name)
+    if (res.ok) {
+      activeProfile.value = name
+      selectedProfile.value = name
+      const p = profiles.value.find((x) => x.name === name)
+      if (p) {
+        Object.assign(llmForm, p)
+        if (!llmForm.api_key) llmForm.api_key = 'EMPTY'
+        const prov = providers.value.find((x) => x.key === p.provider)
+        activeProvider.value = prov ? prov.label : (p.provider || '')
+      }
+      ElMessage.success(res.detail || `已切换到「${name}」`)
+    } else {
+      ElMessage.error(res.detail || '切换失败')
+    }
+  } catch (e) {
+    ElMessage.error('切换失败，请检查后端日志')
+  }
+}
+
+async function handleDeleteProfile() {
+  const name = selectedProfile.value
+  if (!name) return
+  try {
+    await ElMessageBox.confirm(`确定删除配置「${name}」？`, '提示', { type: 'warning' })
+  } catch (e) {
+    return
+  }
+  try {
+    const res = await settingsApi.deleteProfile(name)
+    if (res.ok) {
+      ElMessage.success(res.detail)
+      await refreshProfiles()
+      selectedProfile.value = ''
+      profileName.value = ''
+    } else {
+      ElMessage.error(res.detail || '删除失败')
+    }
+  } catch (e) {
+    ElMessage.error('删除失败，请检查后端日志')
+  }
 }
 
 async function handleTestLlm() {
@@ -407,13 +520,28 @@ async function handleSaveLlm() {
     ElMessage.warning('服务地址和模型名称不能为空')
     return
   }
+  // 名称: 用户填的优先, 否则用当前提供商名兜底(保证能作为一套配置保存)
+  const name = (profileName.value || '').trim() || providerLabel(llmForm.provider)
   llmSaving.value = true
   try {
-    await settingsApi.saveLlm(llmForm)
-    const p = providers.value.find((x) => x.key === llmForm.provider)
-    activeProvider.value = p ? p.label : llmForm.provider
-    ElMessage.success('模型配置已保存，立即生效')
-    llmVisible.value = false
+    const res = await settingsApi.saveProfile({
+      name,
+      provider: llmForm.provider,
+      base_url: llmForm.base_url,
+      model: llmForm.model,
+      api_key: llmForm.api_key || 'EMPTY',
+    })
+    if (res.ok) {
+      activeProfile.value = name
+      selectedProfile.value = name
+      profileName.value = name
+      activeProvider.value = providerLabel(llmForm.provider)
+      await refreshProfiles()
+      ElMessage.success(res.detail || '已保存并生效')
+      llmVisible.value = false
+    } else {
+      ElMessage.error(res.detail || '保存失败')
+    }
   } finally {
     llmSaving.value = false
   }

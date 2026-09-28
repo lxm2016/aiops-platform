@@ -38,12 +38,19 @@
           <div class="storage-cap">
             <div class="storage-cap-label">
               <span>容量使用</span>
-              <span class="num-highlight" :style="{ color: percentColor(d.used_percent) }">
-                {{ d.used_tb.toFixed(1) }} / {{ d.capacity_tb.toFixed(1) }} TB
+              <span
+                class="num-highlight"
+                :style="{ color: d.capacity_tb ? percentColor(d.used_percent) : 'var(--text-sub)' }"
+              >
+                <template v-if="d.capacity_tb">
+                  {{ Number(d.used_tb != null ? d.used_tb : 0).toFixed(1) }} /
+                  {{ Number(d.capacity_tb).toFixed(1) }} TB
+                </template>
+                <template v-else>未采集</template>
               </span>
             </div>
             <el-progress
-              :percentage="Math.min(100, Number(d.used_percent.toFixed(1)))"
+              :percentage="d.capacity_tb ? Math.min(100, Number(d.used_percent || 0)) : 0"
               :color="percentColor(d.used_percent)"
               :stroke-width="10"
             />

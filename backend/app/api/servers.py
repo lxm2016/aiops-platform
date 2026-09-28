@@ -127,6 +127,21 @@ async def test_connection_endpoint(
         raise HTTPException(status_code=502, detail=f"测试失败: {e}")
 
 
+@router.get("/{server_id}/process-list")
+async def process_list_endpoint(server_id: int, db: AsyncSession = Depends(get_db)):
+    """点击"进程数"卡片下钻：只读列出资源占用 TOP 进程（名称/PID/CPU/内存）。
+
+    全程只读, 不执行任何修改操作。
+    """
+    server = await db.get(Server, server_id)
+    if not server:
+        raise HTTPException(status_code=404, detail="服务器不存在")
+    try:
+        return await diagnostic_service.process_list(server)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"获取进程列表失败: {e}")
+
+
 @router.get("/{server_id}/metrics", response_model=List[ServerMetricOut])
 async def get_metrics(
     server_id: int,
