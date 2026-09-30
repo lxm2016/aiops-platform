@@ -375,6 +375,14 @@ class NotifyChannel(Base):
     #       号码别名: {targets} {phone} {mobile} {tel} {called} {callee} {to} {number}
     #       内容别名: {text} {msg} {tts} {play} {message} {speak}
     success_keyword = Column(String(128), default="")           # 响应中包含该字符串视为成功(空=只看HTTP 200)
+
+    # 短信/电话平台常见"账号 + 密码(需哈希)"鉴权, 如 lx598 / 郑州人民医院短信网关:
+    #   accName = 账号明文; accPwd = MD5(大写)(密码明文)。
+    # 密码仅明文存于本表, 发送时由 notify_service 即时做 MD5 大写后填入模板 {accPwd},
+    # 明文与哈希值都不写进 alert_notify_logs, 降低泄露面。
+    account = Column(String(128), default="")                   # 平台账号 (accName)
+    password = Column(String(256), default="")                  # 平台密码 (明文; 发送时按需做 MD5 等变换)
+
     timeout_seconds = Column(Integer, default=10)
 
     remark = Column(String(256), default="")

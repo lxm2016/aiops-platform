@@ -358,6 +358,30 @@
           <el-form-item label="接口地址">
             <el-input v-model="channelForm.http_url" :placeholder="urlPlaceholder" />
           </el-form-item>
+
+          <el-divider content-position="left">平台账号 (鉴权)</el-divider>
+          <el-row :gutter="12">
+            <el-col :span="12">
+              <el-form-item label="账号 (accName)">
+                <el-input v-model="channelForm.account" placeholder="如 meixinyunguanjia" />
+              </el-form-item>
+            </el-col>
+            <el-col :span="12">
+              <el-form-item label="密码">
+                <el-input
+                  v-model="channelForm.password"
+                  type="password"
+                  show-password
+                  placeholder="明文保存, 发送时自动 MD5(大写)"
+                />
+              </el-form-item>
+            </el-col>
+          </el-row>
+          <div class="field-tip">
+            账号与密码用于短信/电话平台的接口鉴权。密码在发送时按平台要求做
+            <b>MD5(大写)</b> 处理后填入模板的 <code>{accPwd}</code>；明文只存库，不在发送日志中打印。
+          </div>
+
           <el-form-item label="请求方式">
             <el-radio-group v-model="channelForm.http_method">
               <el-radio label="POST">POST</el-radio>
@@ -405,6 +429,13 @@
                 @click="fillMfmBox()"
               >
                 填入融智云告警盒子示例
+              </el-button>
+              <el-button
+                v-if="channelForm.type === 'sms'"
+                link type="primary" size="small"
+                @click="fillLxSms()"
+              >
+                填入 lx598 短信平台示例
               </el-button>
             </div>
             <div v-if="channelForm.type === 'voice' || channelForm.type === 'sms'" class="field-tip">
@@ -479,6 +510,7 @@ const channelForm = reactive({
   name: '', type: 'dingtalk', enabled: true,
   webhook_url: '', secret: '', at_mobiles: '', at_all: false,
   targets: '',
+  account: '', password: '',
   http_method: 'POST', http_url: '', http_headers: '', http_body: '',
   success_keyword: '', timeout_seconds: 10, remark: ''
 })
@@ -520,6 +552,19 @@ function fillMfmBox() {
     : '{"Type":"SMS","To":"{phone}","Text":"{content}","Encoding":"UTF-8"}'
   channelForm.success_keyword = '"Reply":"OK"'
   channelForm.remark = '融智云 MFM-920E 告警盒子（Type: Call=电话 / SMS=短信）'
+}
+
+// lx598 / 郑州人民医院短信网关: 实测可用的表单接口格式, 一键填好
+// (密码需用户自己填到「密码」框; 发送时由后端自动做 MD5 大写 -> {accPwd})
+function fillLxSms() {
+  channelForm.account = 'meixinyunguanjia'
+  channelForm.http_url = 'http://172.16.0.141:1110/sdk/send'
+  channelForm.http_method = 'POST'
+  channelForm.http_body =
+    'accName={account}&accPwd={accPwd}&aimcodes={phone}' +
+    '&content={content}【郑州人民医院】&dataType=json'
+  channelForm.success_keyword = ''
+  channelForm.remark = 'lx598 短信平台（郑州人民医院）'
 }
 
 const isRobot = computed(() => ['dingtalk', 'wecom'].includes(channelForm.type))
@@ -666,6 +711,8 @@ function onTypeChange() {
     channelForm.http_headers = ''
     channelForm.success_keyword = ''
     channelForm.targets = ''
+    channelForm.account = ''
+    channelForm.password = ''
   } else {
     channelForm.webhook_url = ''
     channelForm.secret = ''
@@ -680,6 +727,7 @@ function openChannelDialog(row) {
     name: '', type: 'dingtalk', enabled: true,
     webhook_url: '', secret: '', at_mobiles: '', at_all: false,
     targets: '',
+    account: '', password: '',
     http_method: 'POST', http_url: '', http_headers: '', http_body: '',
     success_keyword: '', timeout_seconds: 10, remark: ''
   })

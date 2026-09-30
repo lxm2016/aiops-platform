@@ -357,6 +357,8 @@ class NotifyChannelIn(BaseModel):
     http_headers: str = ""
     http_body: str = ""
     success_keyword: str = ""
+    account: str = ""
+    password: str = ""
     timeout_seconds: int = 10
     remark: str = ""
 
@@ -376,6 +378,8 @@ class NotifyChannelOut(BaseModel):
     http_headers: str
     http_body: str
     success_keyword: str
+    account: str
+    password: str
     timeout_seconds: int
     remark: str
     created_at: datetime

@@ -143,6 +143,9 @@ def _migrate_sqlite():
             ],
             "notify_channels": [    # 短信/电话渠道: 被叫号码独立成一列, 模板里用变量引用
                 ("targets", "TEXT DEFAULT ''"),
+                # 短信平台网关鉴权: 账号(accName) + 密码(发送时按平台做 MD5 大写 -> {accPwd})
+                ("account", "VARCHAR(128) DEFAULT ''"),
+                ("password", "VARCHAR(256) DEFAULT ''"),
             ],
             "env_points": [         # 动环点位: 分组字段(科士达UPS等多点位设备分类显示)
                 # group 是 SQLite 保留字, 必须带双引号

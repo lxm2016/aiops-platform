@@ -221,6 +221,19 @@ def inject_gateway_ctx(ch: "NotifyChannel", ctx: dict, targets: str = None) -> d
             ctx["tts"] = ctx.get("short") or ""
             continue
         ctx.setdefault(k, body or "")
+
+    # 短信/电话平台常见"账号 + 密码(需哈希)"鉴权, 如 lx598 / 郑州人民医院短信网关:
+    #   accName = 账号明文; accPwd = MD5(大写)(密码明文)。
+    # 这里把账号与"哈希后的密码"注入模板。用户只需在请求体模板里写
+    # {account} / {accPwd}, 密码明文只存库、只在发送时即时哈希, 不进日志、不进预览原文的明文。
+    _acc = getattr(ch, "account", None)
+    _pwd = getattr(ch, "password", None)
+    if _acc:
+        ctx["account"] = _acc
+        ctx["accName"] = _acc          # 两个别名都给, 适配不同厂商的参数名
+    if _pwd:
+        ctx["accPwd"] = hashlib.md5(_pwd.encode("utf-8")).hexdigest().upper()
+        ctx["password"] = _pwd         # 个别平台要原文时才用(如某些网关明文传参)
     return ctx
 
 

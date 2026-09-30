@@ -42,25 +42,31 @@ CHANNEL_TYPES = {
     },
     "sms": {
         "label": "短信平台 (院内)",
-        "desc": "对接院内短信告警平台。填写平台提供的 HTTP 接口地址与参数模板即可。",
-        "fields": ["targets", "http_url", "http_method", "http_headers", "http_body",
-                   "success_keyword"],
-        "sample_body": "phone={phone}&content={content}",
+        "desc": "对接院内短信告警平台(如 lx598 / 华为 / 中兴网关)。填写账号、密码、接口地址与"
+                "参数模板即可; 密码在发送时自动做 MD5(大写) 处理, 模板里用 {accPwd} 引用。",
+        "fields": ["targets", "account", "password", "http_url", "http_method",
+                   "http_headers", "http_body", "success_keyword"],
+        # lx598 / 郑州人民医院短信网关实测可用的表单模板(账号/密码自动注入):
+        #   accName=账号, accPwd=密码MD5大写, aimcodes=号码, content=正文(+签名后缀)
+        "sample_body": "accName={account}&accPwd={accPwd}&aimcodes={phone}"
+                       "&content={content}【郑州人民医院】&dataType=json",
         "sample_body_json": '{"mobile":"{mobile}","msg":"{msg}"}',
-        "tips": "号码填在上面的「接收号码」里, 模板里用 {phone}/{mobile} 等占位即可。"
-                "参数名各家不同, 号码可用 {targets}{phone}{mobile}{tel} 任一别名; "
-                "内容可用 {content}{msg}{text} 任一别名。",
+        "tips": "① 账号填「账号」框、口令填「密码」框(明文保存, 发送时自动 MD5 大写); "
+                "② 号码填「接收号码」, 模板用 {phone}/{mobile} 引用; {accPwd} 会自动替换成密码的 MD5 大写; "
+                "③ 模板末尾『【郑州人民医院】』是签名后缀, 可按贵院实际签名修改。",
     },
     "voice": {
         "label": "电话告警盒子",
-        "desc": "对接电话语音告警设备。填写设备/平台提供的 HTTP 呼叫接口与参数模板。",
-        "fields": ["targets", "http_url", "http_method", "http_headers", "http_body",
-                   "success_keyword"],
+        "desc": "对接电话语音告警设备。填写设备/平台提供的 HTTP 呼叫接口与参数模板"
+                "(含账号/密码鉴权时同样支持 MD5 大写)。",
+        "fields": ["targets", "account", "password", "http_url", "http_method",
+                   "http_headers", "http_body", "success_keyword"],
         "sample_body": "called={called}&tts={tts}",
         "sample_body_json": '{"callee":"{callee}","tts":"{tts}"}',
         "tips": "号码填在上面的「被叫号码」里(多个用逗号分隔)。"
                 "号码可用 {targets}{phone}{mobile}{tel}{called}{callee} 任一别名; "
-                "播报内容用 {tts}{text}{msg}{short}, 建议短句, 念太长没人听。",
+                "播报内容用 {tts}{text}{msg}{short}, 建议短句, 念太长没人听。 "
+                "若设备接口需要账号+密码鉴权, 填「账号/密码」框, 模板用 {account}{accPwd}。",
     },
     "webhook": {
         "label": "自定义 Webhook",
