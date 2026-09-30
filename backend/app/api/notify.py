@@ -42,18 +42,18 @@ CHANNEL_TYPES = {
     },
     "sms": {
         "label": "短信平台 (院内)",
-        "desc": "对接院内短信告警平台(如 lx598 / 华为 / 中兴网关)。填写账号、密码、接口地址与"
+        "desc": "对接院内短信告警平台(华为/中兴/各厂商网关)。填写账号、密码、接口地址与"
                 "参数模板即可; 密码在发送时自动做 MD5(大写) 处理, 模板里用 {accPwd} 引用。",
         "fields": ["targets", "account", "password", "http_url", "http_method",
                    "http_headers", "http_body", "success_keyword"],
-        # lx598 / 郑州人民医院短信网关实测可用的表单模板(账号/密码自动注入):
+        # 院内短信网关实测可用的表单模板(账号/密码由后端自动注入):
         #   accName=账号, accPwd=密码MD5大写, aimcodes=号码, content=正文(+签名后缀)
         "sample_body": "accName={account}&accPwd={accPwd}&aimcodes={phone}"
-                       "&content={content}【郑州人民医院】&dataType=json",
+                       "&content={content}【签名】&dataType=json",
         "sample_body_json": '{"mobile":"{mobile}","msg":"{msg}"}',
         "tips": "① 账号填「账号」框、口令填「密码」框(明文保存, 发送时自动 MD5 大写); "
                 "② 号码填「接收号码」, 模板用 {phone}/{mobile} 引用; {accPwd} 会自动替换成密码的 MD5 大写; "
-                "③ 模板末尾『【郑州人民医院】』是签名后缀, 可按贵院实际签名修改。",
+                "③ 模板末尾『【签名】』是短信签名后缀, 请改成贵单位实际的签名。",
     },
     "voice": {
         "label": "电话告警盒子",

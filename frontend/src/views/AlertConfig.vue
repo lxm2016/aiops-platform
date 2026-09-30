@@ -363,7 +363,7 @@
           <el-row :gutter="12">
             <el-col :span="12">
               <el-form-item label="账号 (accName)">
-                <el-input v-model="channelForm.account" placeholder="如 meixinyunguanjia" />
+                <el-input v-model="channelForm.account" placeholder="平台分配的账号名" />
               </el-form-item>
             </el-col>
             <el-col :span="12">
@@ -435,7 +435,7 @@
                 link type="primary" size="small"
                 @click="fillLxSms()"
               >
-                填入 lx598 短信平台示例
+                填入院内短信平台示例
               </el-button>
             </div>
             <div v-if="channelForm.type === 'voice' || channelForm.type === 'sms'" class="field-tip">
@@ -554,17 +554,16 @@ function fillMfmBox() {
   channelForm.remark = '融智云 MFM-920E 告警盒子（Type: Call=电话 / SMS=短信）'
 }
 
-// lx598 / 郑州人民医院短信网关: 实测可用的表单接口格式, 一键填好
-// (密码需用户自己填到「密码」框; 发送时由后端自动做 MD5 大写 -> {accPwd})
+// 院内短信网关(账号+密码 MD5 鉴权): 实测可用的表单接口格式, 一键填好
+// (账号/密码需用户自己填到「账号」「密码」框; 发送时由后端自动做 MD5 大写 -> {accPwd})
 function fillLxSms() {
-  channelForm.account = 'meixinyunguanjia'
   channelForm.http_url = 'http://172.16.0.141:1110/sdk/send'
   channelForm.http_method = 'POST'
   channelForm.http_body =
     'accName={account}&accPwd={accPwd}&aimcodes={phone}' +
-    '&content={content}【郑州人民医院】&dataType=json'
+    '&content={content}【签名】&dataType=json'
   channelForm.success_keyword = ''
-  channelForm.remark = 'lx598 短信平台（郑州人民医院）'
+  channelForm.remark = '院内短信平台'
 }
 
 const isRobot = computed(() => ['dingtalk', 'wecom'].includes(channelForm.type))

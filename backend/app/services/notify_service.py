@@ -222,7 +222,7 @@ def inject_gateway_ctx(ch: "NotifyChannel", ctx: dict, targets: str = None) -> d
             continue
         ctx.setdefault(k, body or "")
 
-    # 短信/电话平台常见"账号 + 密码(需哈希)"鉴权, 如 lx598 / 郑州人民医院短信网关:
+    # 短信/电话平台常见"账号 + 密码(需哈希)"鉴权(院内短信网关等):
     #   accName = 账号明文; accPwd = MD5(大写)(密码明文)。
     # 这里把账号与"哈希后的密码"注入模板。用户只需在请求体模板里写
     # {account} / {accPwd}, 密码明文只存库、只在发送时即时哈希, 不进日志、不进预览原文的明文。
