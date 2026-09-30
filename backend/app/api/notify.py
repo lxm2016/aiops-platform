@@ -56,7 +56,9 @@ CHANNEL_TYPES = {
                 "③ 模板末尾『【签名】』是短信签名后缀, 必须改成在短信平台**备案通过**的签名, "
                 "否则平台会报『签名未通过审核或者签名不存在』且不下发; "
                 "④ 成功标识建议填 \"successedNum\":1 —— 该类网关 HTTP 恒为 200, "
-                "只有 successedNum>0 才是真正提交成功, 不填的话业务失败也会被标成『成功』。",
+                "只有 successedNum>0 才是真正提交成功, 不填的话业务失败也会被标成『成功』; "
+                "⑤ 正式告警发送时, 系统自动把 {content} 换成纯文本短句(类别+对象+指标+数值+状态), "
+                "避免 markdown 超长内容被运营商拦截(现象: 网关显示成功但手机收不到)。",
     },
     "voice": {
         "label": "电话告警盒子",
@@ -189,6 +191,9 @@ async def preview_body(channel_id: int, db: AsyncSession = Depends(get_db)):
         "time": notify_service.now_cn(), "short": "server-01 CPU使用率 92.5% 超限",
     }
     notify_service.inject_gateway_ctx(ch, ctx)
+    # 与实际发送保持一致: 短信渠道的 {content} 渲染的是纯文本短句(非 markdown 全文)
+    if ch.type == "sms":
+        ctx["content"] = notify_service.sms_plain(ctx)
     rendered = notify_service.render(ch.http_body or "", ctx)
     return {"type": ch.type, "method": ch.http_method, "url": ch.http_url,
             "headers": ch.http_headers, "rendered": rendered,

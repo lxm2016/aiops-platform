@@ -190,6 +190,29 @@ _TARGET_ALIASES = ("targets", "phone", "mobile", "tel", "called",
 _CONTENT_ALIASES = ("text", "msg", "tts", "play", "message", "speak", "words")
 
 
+def sms_plain(ctx: dict) -> str:
+    """短信正文用纯文本短句。
+
+    为什么: 正式告警的 content 是 markdown 全文(### /> /**/多行), 直接发短信
+    会被运营商风控拦截 —— 实测现象就是"网关返回发送成功(还按4条计费)、
+    手机却收不到"; 而测试短信是短纯文本, 所以能收到。
+    alert_engine 本来就为电话/短信生成了 100 字内的纯文本 short, 这里优先用;
+    没有短句时把 markdown 压成一行兜底。
+    """
+    short = (ctx.get("short") or "").strip()
+    if short:
+        return short
+    text = ctx.get("content") or ""
+    lines = []
+    for ln in text.splitlines():
+        ln = ln.replace("**", "").strip()
+        ln = re.sub(r"^[#>\s]+", "", ln)          # 行首 markdown 标记
+        ln = re.sub(r"[`|]", "", ln)              # 行内残留符号
+        if ln:
+            lines.append(ln)
+    return " ".join(lines)
+
+
 def split_targets(s: str) -> list:
     """把渠道里填的号码拆成一个个。支持 逗号/分号/竖线/空格 分隔, 去重保序。
 
@@ -268,6 +291,10 @@ async def send_to_channel(ch: NotifyChannel, title: str, content: str, ctx: dict
             return await _send_wecom(ch, title, content)
         if ch.type in ("sms", "voice", "webhook"):
             nums = split_targets(ch.targets)
+            # 短信正文换成纯文本短句: markdown 全文会被运营商拦截(网关显示成功但手机收不到)
+            if ch.type == "sms":
+                ctx = dict(ctx)
+                ctx["content"] = sms_plain(ctx)
             # 电话/短信类设备一次通常只收一个号码 -> 拆开逐个发, 全部成功才算成功
             if len(nums) > 1 and ch.type in ("sms", "voice"):
                 return await _send_gateway_batch(ch, title, content, ctx, nums)
