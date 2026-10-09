@@ -146,7 +146,9 @@ export const serverApi = {
   testConn: (id, data) => http.post(`/servers/${id}/test-connection`, data, { timeout: 30000 }),
   // 点击"进程数"卡片下钻: 只读列出资源占用 TOP 进程
   processList: (id) => http.get(`/servers/${id}/process-list`, { timeout: 60000 }),
-  summary: () => http.get('/servers/stats/summary')
+  summary: () => http.get('/servers/stats/summary'),
+  // 暂停/恢复监测 (enabled=False: 不采集/不告警/不标离线, Agent 上报被忽略)
+  setEnabled: (id, enabled) => http.patch(`/servers/${id}/enabled`, { enabled })
 }
 
 // ---------- VMware ----------
@@ -156,7 +158,9 @@ export const vmwareApi = {
   deleteHost: (id) => http.delete(`/vmware/hosts/${id}`),
   syncHost: (id) => http.post(`/vmware/hosts/${id}/sync`, null, { timeout: 180000 }),
   listVms: (params) => http.get('/vmware/vms', { params }),
-  listHostVms: (hostId) => http.get(`/vmware/hosts/${hostId}/vms`)
+  listHostVms: (hostId) => http.get(`/vmware/hosts/${hostId}/vms`),
+  // 暂停/恢复同步一个 vCenter/ESXi
+  setEnabled: (id, enabled) => http.patch(`/vmware/hosts/${id}/enabled`, { enabled })
 }
 
 // ---------- 机柜管理 ----------
@@ -181,6 +185,8 @@ export const networkApi = {
   remove: (id) => http.delete(`/network/${id}`),
   // 单台轮询可能要等待 SNMP 超时, 给足时间
   poll: (id) => http.post(`/network/${id}/poll`, null, { timeout: 120000 }),
+  // 暂停/恢复监测一台网络设备
+  setEnabled: (id, enabled) => http.patch(`/network/${id}/enabled`, { enabled }),
   ports: (id) => http.get(`/network/${id}/ports`),
   testPort: (id, portIndex) =>
     http.post(`/network/${id}/ports/${portIndex}/test`, null, { timeout: 60000 }),
@@ -194,7 +200,9 @@ export const storageApi = {
   create: (data) => http.post('/storage', data),
   update: (id, data) => http.put(`/storage/${id}`, data),
   remove: (id) => http.delete(`/storage/${id}`),
-  poll: (id) => http.post(`/storage/${id}/poll`, null, { timeout: 120000 })
+  poll: (id) => http.post(`/storage/${id}/poll`, null, { timeout: 120000 }),
+  // 暂停/恢复监测一台存储设备
+  setEnabled: (id, enabled) => http.patch(`/storage/${id}/enabled`, { enabled })
 }
 
 // ---------- 动环设备 (Modbus TCP: 温湿度/烟感/水浸/UPS) ----------

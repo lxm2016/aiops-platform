@@ -131,6 +131,17 @@ def _migrate_sqlite():
                 ("diag_user", "VARCHAR(128) DEFAULT ''"),
                 ("diag_password", "VARCHAR(256) DEFAULT ''"),
                 ("diag_port", "INTEGER DEFAULT 22"),
+                # 监测开关: False=暂停监测(不采集/不告警/不标离线)
+                ("enabled", "BOOLEAN DEFAULT 1"),
+            ],
+            "network_devices": [
+                ("enabled", "BOOLEAN DEFAULT 1"),
+            ],
+            "storage_devices": [
+                ("enabled", "BOOLEAN DEFAULT 1"),
+            ],
+            "vmware_hosts": [
+                ("enabled", "BOOLEAN DEFAULT 1"),
             ],
             "alerts": [            # 可配置告警规则改造新增的列
                 ("rule_id", "INTEGER"),

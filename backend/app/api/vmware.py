@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.models import VmwareHost, VirtualMachine
-from app.schemas.schemas import VmwareHostCreate, VmwareHostOut, VirtualMachineOut
+from app.schemas.schemas import VmwareHostCreate, VmwareHostOut, VirtualMachineOut, EnabledIn
 from app.services.vmware_service import collect_vmware_data
 
 router = APIRouter(prefix="/api/vmware", tags=["vmware"])
@@ -38,6 +38,23 @@ async def delete_host(host_id: int, db: AsyncSession = Depends(get_db)):
     await db.delete(host)
     await db.commit()
     return {"ok": True}
+
+
+@router.patch("/hosts/{host_id}/enabled", response_model=VmwareHostOut)
+async def toggle_vmware_enabled(
+    host_id: int, data: EnabledIn, db: AsyncSession = Depends(get_db)
+):
+    """暂停/恢复同步一个 vCenter/ESXi。
+
+    enabled=False: 不再做周期虚拟机清单同步与状态更新。
+    """
+    host = await db.get(VmwareHost, host_id)
+    if not host:
+        raise HTTPException(status_code=404, detail="不存在")
+    host.enabled = data.enabled
+    await db.commit()
+    await db.refresh(host)
+    return host
 
 
 async def upsert_vms(db: AsyncSession, host_id: int, vms: list):

@@ -12,6 +12,7 @@ from app.core.database import get_db
 from app.models import Server, ServerMetric, Alert
 from app.schemas.schemas import (
     ServerCreate, ServerOut, MetricReport, ServerMetricOut, ServerTestIn,
+    EnabledIn,
 )
 from app.services.alert_engine import (
     evaluate_server_metrics, evaluate_device_offline, flush_notifications,
@@ -83,6 +84,25 @@ async def update_server(
             raise HTTPException(status_code=400, detail="该IP已存在")
     for k, v in data.model_dump(exclude_unset=True).items():
         setattr(server, k, v)
+    await db.commit()
+    await db.refresh(server)
+    invalidate_ip_cache()
+    return server
+
+
+@router.patch("/{server_id}/enabled", response_model=ServerOut)
+async def toggle_server_enabled(
+    server_id: int, data: EnabledIn, db: AsyncSession = Depends(get_db)
+):
+    """暂停/恢复监测一台服务器。
+
+    enabled=False: 不再采集指标、不参与离线判定、不触发告警;
+    前端 Agent 上报会被忽略(见 report_metrics 的早返回)。
+    """
+    server = await db.get(Server, server_id)
+    if not server:
+        raise HTTPException(status_code=404, detail="服务器不存在")
+    server.enabled = data.enabled
     await db.commit()
     await db.refresh(server)
     invalidate_ip_cache()
@@ -258,6 +278,10 @@ async def report_metrics(
         await db.flush()
 
     # Update server info
+    # 已禁用(暂停监测)的服务器: 不改状态、不写指标, 相当于"平台不监测它"
+    if not server.enabled:
+        return {"ok": True, "skipped": True, "detail": "该服务器已暂停监测(enabled=False)"}
+
     was_offline = server.status != "online"
     server.status = "online"
     server.last_seen = datetime.utcnow()

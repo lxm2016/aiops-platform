@@ -27,9 +27,20 @@
               <el-icon color="#00d4ff"><Box /></el-icon>
               {{ d.name }}
             </div>
-            <el-tag :type="statusTagType(d.status)" size="small" effect="dark">
-              {{ statusLabel(d.status) }}
-            </el-tag>
+            <div style="display: flex; align-items: center; gap: 8px">
+              <el-switch
+                :model-value="d.enabled"
+                :loading="toggling[d.id]"
+                inline-prompt
+                active-text="监测"
+                inactive-text="停用"
+                @change="(val) => setMonitor(d, val)"
+              />
+              <el-tag v-if="!d.enabled" type="info" size="small" effect="plain">已暂停</el-tag>
+              <el-tag v-else :type="statusTagType(d.status)" size="small" effect="dark">
+                {{ statusLabel(d.status) }}
+              </el-tag>
+            </div>
           </div>
           <div class="storage-meta">
             <span>{{ d.vendor || '未知厂商' }} · {{ d.model || '未知型号' }}</span>
@@ -406,6 +417,7 @@ const submitting = ref(false)
 const editingId = ref(null)
 const formRef = ref(null)
 const pollingId = ref(null)
+const toggling = reactive({})
 
 const V3_DEFAULTS = {
   snmp_v3_user: '',
@@ -513,6 +525,20 @@ async function handleDelete(d) {
   await storageApi.remove(d.id)
   ElMessage.success('删除成功')
   load()
+}
+
+// 暂停/恢复监测: 关掉后该存储设备不参与 SNMP/SMI-S 轮询、不触发离线/容量告警
+async function setMonitor(d, val) {
+  toggling[d.id] = true
+  try {
+    await storageApi.setEnabled(d.id, val)
+    d.enabled = val
+    ElMessage.success(val ? '已恢复监测' : '已暂停监测')
+  } catch (e) {
+    ElMessage.error('操作失败: ' + ((e && e.message) || '未知错误'))
+  } finally {
+    toggling[d.id] = false
+  }
 }
 
 // ---------- 明细 ----------

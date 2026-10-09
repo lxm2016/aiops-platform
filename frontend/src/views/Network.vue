@@ -34,9 +34,22 @@
         <el-table-column prop="model" label="型号" min-width="140" show-overflow-tooltip />
         <el-table-column label="状态" width="90" align="center">
           <template #default="{ row }">
-            <el-tag :type="statusTagType(row.status)" size="small" effect="dark">
+            <el-tag v-if="!row.enabled" type="info" size="small" effect="plain">已暂停</el-tag>
+            <el-tag v-else :type="statusTagType(row.status)" size="small" effect="dark">
               {{ statusLabel(row.status) }}
             </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="监测" width="110" align="center">
+          <template #default="{ row }">
+            <el-switch
+              :model-value="row.enabled"
+              :loading="toggling[row.id]"
+              inline-prompt
+              active-text="监测"
+              inactive-text="停用"
+              @change="(val) => setMonitor(row, val)"
+            />
           </template>
         </el-table-column>
         <el-table-column label="端口 (UP/总)" width="110" align="center">
@@ -199,6 +212,7 @@ const dialogVisible = ref(false)
 const submitting = ref(false)
 const formRef = ref(null)
 const editingId = ref(null)
+const toggling = reactive({})
 
 function goDetail(row) {
   router.push(`/network/${row.id}`)
@@ -298,6 +312,20 @@ async function handleDelete(row) {
   await networkApi.remove(row.id)
   ElMessage.success('删除成功')
   load()
+}
+
+// 暂停/恢复监测: 关掉后该设备不参与 SNMP 轮询、不触发离线/CPU/内存告警
+async function setMonitor(row, val) {
+  toggling[row.id] = true
+  try {
+    await networkApi.setEnabled(row.id, val)
+    row.enabled = val
+    ElMessage.success(val ? '已恢复监测' : '已暂停监测')
+  } catch (e) {
+    ElMessage.error('操作失败: ' + ((e && e.message) || '未知错误'))
+  } finally {
+    toggling[row.id] = false
+  }
 }
 
 // ---------- 端口明细 ----------

@@ -145,9 +145,22 @@
         </el-table-column>
         <el-table-column label="状态" width="100">
           <template #default="{ row }">
-            <el-tag v-if="row.status === 'online'" type="success" size="small">在线</el-tag>
+            <el-tag v-if="!row.enabled" type="info" size="small" effect="plain">已暂停</el-tag>
+            <el-tag v-else-if="row.status === 'online'" type="success" size="small">在线</el-tag>
             <el-tag v-else-if="row.status === 'offline'" type="danger" size="small">离线</el-tag>
             <el-tag v-else type="info" size="small">未探测</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="监测" width="110" align="center">
+          <template #default="{ row }">
+            <el-switch
+              :model-value="row.enabled"
+              :loading="toggling[row.id]"
+              inline-prompt
+              active-text="监测"
+              inactive-text="停用"
+              @change="(val) => setMonitor(row, val)"
+            />
           </template>
         </el-table-column>
         <el-table-column label="最近通信" width="160">
@@ -355,6 +368,7 @@ const devices = ref([])
 const pointsMap = reactive({})
 const expanded = ref([])
 const rowPolling = reactive({})
+const toggling = reactive({})
 const meta = reactive({ categories: [], templates: {}, point_keys: [], function_codes: [], data_types: [] })
 
 const devVisible = ref(false)
@@ -542,6 +556,34 @@ async function delDevice(row) {
   await envDeviceApi.removeDevice(row.id)
   ElMessage.success('已删除')
   await load()
+}
+
+// 暂停/恢复监测: 关掉后该动环设备不参与轮询、不触发点位超阈值告警
+async function setMonitor(row, val) {
+  toggling[row.id] = true
+  try {
+    const payload = {
+      name: row.name,
+      category: row.category,
+      protocol: row.protocol,
+      ip: row.ip,
+      port: row.port,
+      slave_id: row.slave_id,
+      location: row.location || '',
+      cluster: row.cluster || '',
+      resource_group: row.resource_group || '',
+      poll_interval: row.poll_interval || 0,
+      enabled: val,
+      remark: row.remark || ''
+    }
+    await envDeviceApi.updateDevice(row.id, payload)
+    row.enabled = val
+    ElMessage.success(val ? '已恢复监测' : '已暂停监测')
+  } catch (e) {
+    ElMessage.error('操作失败: ' + ((e?.response?.data?.detail) || (e && e.message) || '未知错误'))
+  } finally {
+    toggling[row.id] = false
+  }
 }
 
 function openPoint(deviceRow, point) {

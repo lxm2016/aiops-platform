@@ -49,9 +49,22 @@
         </el-table-column>
         <el-table-column label="状态" width="90" align="center">
           <template #default="{ row }">
-            <el-tag :type="statusTagType(row.status)" size="small" effect="dark">
+            <el-tag v-if="!row.enabled" type="info" size="small" effect="plain">已暂停</el-tag>
+            <el-tag v-else :type="statusTagType(row.status)" size="small" effect="dark">
               {{ statusLabel(row.status) }}
             </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="监测" width="110" align="center">
+          <template #default="{ row }">
+            <el-switch
+              :model-value="row.enabled"
+              :loading="toggling[row.id]"
+              inline-prompt
+              active-text="监测"
+              inactive-text="停用"
+              @change="(val) => setMonitor(row, val)"
+            />
           </template>
         </el-table-column>
         <el-table-column label="最后上报" width="170">
@@ -153,6 +166,7 @@ const editingId = ref(null)
 const formRef = ref(null)
 const testing = ref(false)
 const testResult = ref(null)
+const toggling = reactive({})
 
 const EMPTY_FORM = {
   name: '',
@@ -161,6 +175,7 @@ const EMPTY_FORM = {
   os_distro: '',
   os_version: '',
   tags: '',
+  enabled: true,
   diag_user: '',
   diag_password: '',
   diag_port: 22,
@@ -220,12 +235,27 @@ function openEdit(row) {
     os_distro: row.os_distro || '',
     os_version: row.os_version || '',
     tags: row.tags || '',
+    enabled: row.enabled !== false,    // 暂停监测标记随编辑保留
     diag_user: row.diag_user || '',
     diag_password: '',                 // 出于安全不回显密码, 留空即不修改
     diag_port: row.diag_port || 22,
   })
   testResult.value = null
   dialogVisible.value = true
+}
+
+// 暂停/恢复监测: 关掉后该服务器不采集、不告警、不标离线, Agent 上报会被忽略
+async function setMonitor(row, val) {
+  toggling[row.id] = true
+  try {
+    await serverApi.setEnabled(row.id, val)
+    row.enabled = val
+    ElMessage.success(val ? '已恢复监测' : '已暂停监测')
+  } catch (e) {
+    ElMessage.error('操作失败: ' + ((e && e.message) || '未知错误'))
+  } finally {
+    toggling[row.id] = false
+  }
 }
 
 // 测试连接：用表单里刚输入（尚未保存）的凭据直接测，密码留空则用已存密码

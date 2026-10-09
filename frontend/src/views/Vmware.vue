@@ -18,9 +18,22 @@
         <el-table-column prop="port" label="端口" width="80" align="center" />
         <el-table-column label="状态" width="100" align="center">
           <template #default="{ row }">
-            <el-tag :type="statusTagType(row.status)" size="small" effect="dark">
+            <el-tag v-if="!row.enabled" type="info" size="small" effect="plain">已暂停</el-tag>
+            <el-tag v-else :type="statusTagType(row.status)" size="small" effect="dark">
               {{ statusLabel(row.status) }}
             </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="监测" width="110" align="center">
+          <template #default="{ row }">
+            <el-switch
+              :model-value="row.enabled"
+              :loading="toggling[row.id]"
+              inline-prompt
+              active-text="监测"
+              inactive-text="停用"
+              @change="(val) => setMonitor(row, val)"
+            />
           </template>
         </el-table-column>
         <el-table-column label="最后同步" width="170">
@@ -141,6 +154,7 @@ const filterHostId = ref(null)
 const dialogVisible = ref(false)
 const submitting = ref(false)
 const formRef = ref(null)
+const toggling = reactive({})
 
 const form = reactive({
   name: '',
@@ -217,6 +231,20 @@ async function handleDelete(row) {
   await vmwareApi.deleteHost(row.id)
   ElMessage.success('删除成功')
   loadAll()
+}
+
+// 暂停/恢复同步: 关掉后该 vCenter/ESXi 不再做周期虚拟机清单同步与状态更新
+async function setMonitor(row, val) {
+  toggling[row.id] = true
+  try {
+    await vmwareApi.setEnabled(row.id, val)
+    row.enabled = val
+    ElMessage.success(val ? '已恢复同步' : '已暂停同步')
+  } catch (e) {
+    ElMessage.error('操作失败: ' + ((e && e.message) || '未知错误'))
+  } finally {
+    toggling[row.id] = false
+  }
 }
 
 onMounted(loadAll)

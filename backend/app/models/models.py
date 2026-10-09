@@ -23,6 +23,7 @@ class Server(Base):
     mem_total_gb = Column(Float, default=0.0)
     status = Column(String(16), default="unknown")  # online / offline / unknown
     agent_installed = Column(Boolean, default=False)
+    enabled = Column(Boolean, default=True)         # False=暂停监测: 不采集/不告警/不标离线
     last_seen = Column(DateTime, nullable=True)
     tags = Column(String(256), default="")
     # ---- 只读诊断凭据 (AI 连服务器排查 CPU/内存/磁盘用, 绝不做写操作) ----
@@ -69,6 +70,7 @@ class VmwareHost(Base):
     password = Column(String(256), default="")
     port = Column(Integer, default=443)
     status = Column(String(16), default="unknown")
+    enabled = Column(Boolean, default=True)         # False=暂停同步该 vCenter/ESXi
     last_sync = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
@@ -108,6 +110,7 @@ class NetworkDevice(Base):
     snmp_community = Column(String(128), default="public")
     snmp_version = Column(String(8), default="2c")
     status = Column(String(16), default="unknown")
+    enabled = Column(Boolean, default=True)         # False=暂停监测: 不采集/不告警/不标离线
     cpu_percent = Column(Float, default=0.0)
     mem_percent = Column(Float, default=0.0)
     port_total = Column(Integer, default=0)
@@ -187,6 +190,7 @@ class StorageDevice(Base):
     used_percent = Column(Float, default=0.0)
     details = Column(JSON, default=dict)           # 控制器/磁盘/存储池/卷等明细
     status = Column(String(16), default="unknown")
+    enabled = Column(Boolean, default=True)         # False=暂停监测: 不采集/不告警/不标离线
     last_seen = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 

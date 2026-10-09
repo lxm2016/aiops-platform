@@ -13,7 +13,7 @@ from app.models import (
 from app.schemas.schemas import (
     NetworkDeviceCreate, NetworkDeviceOut,
     StorageDeviceCreate, StorageDeviceOut,
-    PortRemarkIn,
+    PortRemarkIn, EnabledIn,
 )
 from app.services.snmp_service import (
     collect_network_device, get_port_status,
@@ -62,6 +62,23 @@ async def delete_network_device(device_id: int, db: AsyncSession = Depends(get_d
     await db.delete(device)
     await db.commit()
     return {"ok": True}
+
+
+@router.patch("/network/{device_id}/enabled", response_model=NetworkDeviceOut)
+async def toggle_network_enabled(
+    device_id: int, data: EnabledIn, db: AsyncSession = Depends(get_db)
+):
+    """暂停/恢复监测一台网络设备(交换机/路由器/防火墙)。
+
+    enabled=False: 不参与 SNMP 轮询、不改状态、不触发离线/CPU/内存告警。
+    """
+    device = await db.get(NetworkDevice, device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail="不存在")
+    device.enabled = data.enabled
+    await db.commit()
+    await db.refresh(device)
+    return device
 
 
 @router.post("/network/{device_id}/poll")
@@ -224,6 +241,23 @@ async def delete_storage(device_id: int, db: AsyncSession = Depends(get_db)):
     await db.delete(device)
     await db.commit()
     return {"ok": True}
+
+
+@router.patch("/storage/{device_id}/enabled", response_model=StorageDeviceOut)
+async def toggle_storage_enabled(
+    device_id: int, data: EnabledIn, db: AsyncSession = Depends(get_db)
+):
+    """暂停/恢复监测一台存储设备。
+
+    enabled=False: 不参与 SNMP/SMI-S 轮询、不改状态、不触发离线/容量告警。
+    """
+    device = await db.get(StorageDevice, device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail="不存在")
+    device.enabled = data.enabled
+    await db.commit()
+    await db.refresh(device)
+    return device
 
 
 def _snmp_cred(device) -> object:

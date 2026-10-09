@@ -142,6 +142,8 @@ async def mark_offline_servers():
         result = await db.execute(
             select(Server).where(
                 Server.status == "online",
+                # 已禁用(暂停监测)的服务器不参与离线判定, 也不会触发离线告警
+                Server.enabled == True,  # noqa: E712
                 (Server.last_seen < threshold) | (Server.last_seen.is_(None)),
             )
         )
@@ -174,7 +176,10 @@ async def poll_all_network_devices():
     from app.api.devices import upsert_ports  # 延迟导入, 避免循环依赖
 
     async with AsyncSessionLocal() as db:
-        result = await db.execute(select(NetworkDevice))
+        result = await db.execute(
+            # 已禁用的网络设备不采集、不改状态、不触发离线告警
+            select(NetworkDevice).where(NetworkDevice.enabled == True)  # noqa: E712
+        )
         devices = result.scalars().all()
         # 提前取出需要的字段, 避免会话关闭后访问已过期属性
         device_list = [
@@ -234,7 +239,10 @@ async def poll_all_network_devices():
 async def poll_all_storage():
     """周期采集所有配置了协议的存储设备 (SNMP/SMI-S)。"""
     async with AsyncSessionLocal() as db:
-        result = await db.execute(select(StorageDevice))
+        result = await db.execute(
+            # 已禁用的存储设备不采集、不改状态、不触发离线告警
+            select(StorageDevice).where(StorageDevice.enabled == True)  # noqa: E712
+        )
         devices = result.scalars().all()
         device_list = []
         for d in devices:
@@ -325,7 +333,10 @@ async def sync_all_vmware():
     from app.api.vmware import upsert_vms  # 延迟导入, 避免循环依赖
 
     async with AsyncSessionLocal() as db:
-        hosts = (await db.execute(select(VmwareHost))).scalars().all()
+        # 已禁用的 vCenter/ESXi 不再做周期同步
+        hosts = (await db.execute(
+            select(VmwareHost).where(VmwareHost.enabled == True)  # noqa: E712
+        )).scalars().all()
         host_list = [
             {"id": h.id, "host": h.host, "username": h.username,
              "password": h.password, "port": h.port}

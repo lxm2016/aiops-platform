@@ -37,6 +37,11 @@ class PortRemarkIn(BaseModel):
     remark: str = ""
 
 
+class EnabledIn(BaseModel):
+    """通用开关: 暂停/恢复监测某个监控点(服务器/网络设备/存储/VMware)。"""
+    enabled: bool
+
+
 # ---------- Server ----------
 class ServerCreate(BaseModel):
     name: str
@@ -45,6 +50,7 @@ class ServerCreate(BaseModel):
     os_distro: str = ""
     os_version: str = ""
     tags: str = ""
+    enabled: bool = True            # False=暂停监测
     # 只读诊断凭据 (Linux=SSH / Windows=WinRM), 留空则无法做实时排查
     diag_user: str = ""
     diag_password: str = ""
@@ -63,6 +69,7 @@ class ServerOut(BaseModel):
     mem_total_gb: float
     status: str
     agent_installed: bool
+    enabled: bool = True
     last_seen: Optional[datetime]
     tags: str
     created_at: datetime
@@ -131,6 +138,7 @@ class VmwareHostCreate(BaseModel):
     username: str = ""
     password: str = ""
     port: int = 443
+    enabled: bool = True
 
 
 class VmwareHostOut(BaseModel):
@@ -139,6 +147,7 @@ class VmwareHostOut(BaseModel):
     host: str
     port: int
     status: str
+    enabled: bool = True
     last_sync: Optional[datetime]
     created_at: datetime
 
@@ -173,6 +182,7 @@ class NetworkDeviceCreate(BaseModel):
     model: str = ""
     snmp_community: str = "public"
     snmp_version: str = "2c"
+    enabled: bool = True
 
 
 class NetworkDeviceOut(BaseModel):
@@ -185,6 +195,7 @@ class NetworkDeviceOut(BaseModel):
     snmp_community: str
     snmp_version: str
     status: str
+    enabled: bool = True
     cpu_percent: float
     mem_percent: float
     port_total: int
@@ -217,6 +228,7 @@ class StorageDeviceCreate(BaseModel):
     username: str = ""
     password: str = ""
     capacity_tb: float = 0.0
+    enabled: bool = True
 
 
 class StorageDeviceOut(BaseModel):
@@ -241,6 +253,7 @@ class StorageDeviceOut(BaseModel):
     used_percent: float
     details: Optional[Any] = None
     status: str
+    enabled: bool = True
     last_seen: Optional[datetime]
     created_at: datetime
 
