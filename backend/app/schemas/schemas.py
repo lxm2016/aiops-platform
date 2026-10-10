@@ -42,6 +42,12 @@ class EnabledIn(BaseModel):
     enabled: bool
 
 
+class BatchEnabledIn(BaseModel):
+    """批量开关: 一次性暂停/恢复监测多个监控点。"""
+    ids: List[int]
+    enabled: bool
+
+
 # ---------- Server ----------
 class ServerCreate(BaseModel):
     name: str

@@ -19,11 +19,22 @@
       要么保持关闭、用 DeviceManager 里创建的 <b>SNMPv3 USM 用户</b>（更安全，推荐）。
     </div>
 
+    <div v-if="selectedIds.length" class="batch-bar">
+      <span class="batch-info">已选 <b>{{ selectedIds.length }}</b> 台</span>
+      <el-button size="small" type="warning" :loading="batching" @click="batchSet(false)">批量停用监测</el-button>
+      <el-button size="small" type="success" :loading="batching" @click="batchSet(true)">批量启用监测</el-button>
+      <el-button size="small" text @click="clearSelection">取消选择</el-button>
+    </div>
+
     <el-row :gutter="16">
       <el-col v-for="d in devices" :key="d.id" :span="8" style="margin-bottom: 16px">
         <el-card class="tech-card storage-card" shadow="never">
           <div class="storage-head">
             <div class="storage-name">
+              <el-checkbox
+                :model-value="selectedIds.includes(d.id)"
+                @change="(v) => toggleSelect(d.id, v)"
+              />
               <el-icon color="#00d4ff"><Box /></el-icon>
               {{ d.name }}
             </div>
@@ -418,6 +429,8 @@ const editingId = ref(null)
 const formRef = ref(null)
 const pollingId = ref(null)
 const toggling = reactive({})
+const selectedIds = ref([])
+const batching = ref(false)
 
 const V3_DEFAULTS = {
   snmp_v3_user: '',
@@ -538,6 +551,37 @@ async function setMonitor(d, val) {
     ElMessage.error('操作失败: ' + ((e && e.message) || '未知错误'))
   } finally {
     toggling[d.id] = false
+  }
+}
+
+// 卡片网格没有表格选择列, 用 selectedIds 数组维护勾选, 再一次性调用批量接口
+function toggleSelect(id, val) {
+  if (val) {
+    if (!selectedIds.value.includes(id)) selectedIds.value.push(id)
+  } else {
+    selectedIds.value = selectedIds.value.filter((x) => x !== id)
+  }
+}
+function clearSelection() {
+  selectedIds.value = []
+}
+
+async function batchSet(enabled) {
+  const ids = [...selectedIds.value]
+  if (!ids.length) return
+  batching.value = true
+  try {
+    const res = await storageApi.batchSetEnabled(ids, enabled)
+    const set = new Set(ids)
+    devices.value.forEach((d) => {
+      if (set.has(d.id)) d.enabled = enabled
+    })
+    ElMessage.success(`已${enabled ? '启用' : '停用'} ${res.updated} 台存储设备监测`)
+    clearSelection()
+  } catch (e) {
+    ElMessage.error('批量操作失败: ' + ((e && e.message) || '未知错误'))
+  } finally {
+    batching.value = false
   }
 }
 
@@ -670,5 +714,23 @@ onMounted(load)
   font-size: 12px;
   line-height: 1.7;
   color: var(--text-sub);
+}
+
+.batch-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  margin-bottom: 14px;
+  background: rgba(47, 123, 255, 0.06);
+  border: 1px solid var(--border-tech);
+  border-radius: 6px;
+}
+.batch-bar .batch-info {
+  color: var(--text-sub);
+  font-size: 13px;
+}
+.batch-bar .batch-info b {
+  color: var(--accent, #00d4ff);
 }
 </style>

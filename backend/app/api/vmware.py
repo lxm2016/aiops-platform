@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.models import VmwareHost, VirtualMachine
-from app.schemas.schemas import VmwareHostCreate, VmwareHostOut, VirtualMachineOut, EnabledIn
+from app.schemas.schemas import VmwareHostCreate, VmwareHostOut, VirtualMachineOut, EnabledIn, BatchEnabledIn
 from app.services.vmware_service import collect_vmware_data
 
 router = APIRouter(prefix="/api/vmware", tags=["vmware"])
@@ -85,6 +85,26 @@ async def upsert_vms(db: AsyncSession, host_id: int, vms: list):
         await db.delete(vm)
 
     await db.commit()
+
+
+@router.post("/hosts/batch-enabled")
+async def batch_set_vmware_enabled(
+    data: BatchEnabledIn, db: AsyncSession = Depends(get_db)
+):
+    """批量暂停/恢复同步多个 vCenter/ESXi(配合前端列表复选框)。
+
+    enabled=False: 这些主机不再做周期虚拟机清单同步与状态更新。
+    """
+    if not data.ids:
+        return {"ok": True, "updated": 0}
+    result = await db.execute(
+        select(VmwareHost).where(VmwareHost.id.in_(data.ids))
+    )
+    rows = result.scalars().all()
+    for h in rows:
+        h.enabled = data.enabled
+    await db.commit()
+    return {"ok": True, "updated": len(rows)}
 
 
 @router.post("/hosts/{host_id}/sync")

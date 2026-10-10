@@ -8,8 +8,22 @@
       </div>
     </div>
 
+    <div v-if="selectedRows.length" class="batch-bar">
+      <span class="batch-info">已选 <b>{{ selectedRows.length }}</b> 台</span>
+      <el-button size="small" type="warning" :loading="batching" @click="batchSet(false)">批量停用监测</el-button>
+      <el-button size="small" type="success" :loading="batching" @click="batchSet(true)">批量启用监测</el-button>
+      <el-button size="small" text @click="clearSelection">取消选择</el-button>
+    </div>
+
     <el-card class="tech-card" shadow="never">
-      <el-table :data="devices" v-loading="loading">
+      <el-table
+        ref="tableRef"
+        :data="devices"
+        v-loading="loading"
+        row-key="id"
+        @selection-change="(rows) => (selectedRows = rows)"
+      >
+        <el-table-column type="selection" width="50" />
         <el-table-column prop="id" label="ID" width="60" />
         <el-table-column label="名称" min-width="140">
           <template #default="{ row }">
@@ -213,6 +227,9 @@ const submitting = ref(false)
 const formRef = ref(null)
 const editingId = ref(null)
 const toggling = reactive({})
+const tableRef = ref(null)
+const selectedRows = ref([])
+const batching = ref(false)
 
 function goDetail(row) {
   router.push(`/network/${row.id}`)
@@ -328,6 +345,31 @@ async function setMonitor(row, val) {
   }
 }
 
+// 批量暂停/恢复监测: 一次调用后端 /network/batch-enabled, 并更新本地行状态
+async function batchSet(enabled) {
+  const ids = selectedRows.value.map((r) => r.id)
+  if (!ids.length) return
+  batching.value = true
+  try {
+    const res = await networkApi.batchSetEnabled(ids, enabled)
+    const set = new Set(ids)
+    devices.value.forEach((d) => {
+      if (set.has(d.id)) d.enabled = enabled
+    })
+    ElMessage.success(`已${enabled ? '启用' : '停用'} ${res.updated} 台网络设备监测`)
+    clearSelection()
+  } catch (e) {
+    ElMessage.error('批量操作失败: ' + ((e && e.message) || '未知错误'))
+  } finally {
+    batching.value = false
+  }
+}
+
+function clearSelection() {
+  tableRef.value?.clearSelection()
+  selectedRows.value = []
+}
+
 // ---------- 端口明细 ----------
 const portsVisible = ref(false)
 const portsLoading = ref(false)
@@ -396,3 +438,23 @@ async function handleSaveRemark(row) {
 
 onMounted(load)
 </script>
+
+<style scoped>
+.batch-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  margin-bottom: 14px;
+  background: rgba(47, 123, 255, 0.06);
+  border: 1px solid var(--border-tech);
+  border-radius: 6px;
+}
+.batch-bar .batch-info {
+  color: var(--text-sub);
+  font-size: 13px;
+}
+.batch-bar .batch-info b {
+  color: var(--accent, #00d4ff);
+}
+</style>

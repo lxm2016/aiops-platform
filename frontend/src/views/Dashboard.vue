@@ -6,33 +6,36 @@
         <StatCard label="服务器总数" :value="summary.total" icon="Monitor" color="#00d4ff" to="/servers" />
       </el-col>
       <el-col :span="6">
-        <StatCard label="在线服务器" :value="summary.online" icon="CircleCheck" color="#00e396" to="/servers" :query="{ status: 'online' }" />
+        <StatCard label="在线服务器" :value="summary.online" icon="CircleCheck" color="#00e396" to="/servers" :query="{ status: 'online', enabled: 'true' }" />
       </el-col>
       <el-col :span="6">
-        <StatCard label="离线服务器" :value="summary.offline" icon="CircleClose" color="#ff4d5e" to="/servers" :query="{ status: 'offline' }" />
+        <StatCard label="离线服务器" :value="summary.offline" icon="CircleClose" color="#ff4d5e" to="/servers" :query="{ status: 'offline', enabled: 'true' }" />
       </el-col>
       <el-col :span="6">
-        <StatCard label="未处理告警" :value="summary.open_alerts" icon="Bell" color="#ffb020" to="/alerts" :query="{ status: 'open' }" />
+        <StatCard label="已暂停监测" :value="summary.paused" icon="VideoPause" color="#ffb020" to="/servers" :query="{ enabled: 'false' }" />
       </el-col>
     </el-row>
 
     <!-- 动环设备概览 -->
     <el-row :gutter="16" style="margin-top: 16px">
-      <el-col :span="8">
+      <el-col :span="6">
         <StatCard label="动环设备总数" :value="envSummary.devices" icon="Odometer" color="#2f7bff" to="/env-devices" />
       </el-col>
-      <el-col :span="8">
+      <el-col :span="6">
         <StatCard label="在线设备" :value="envSummary.devices_online" icon="CircleCheck" color="#00e396" to="/env-devices" />
       </el-col>
-      <el-col :span="8">
+      <el-col :span="6">
         <StatCard label="告警点位" :value="envSummary.points_alarm" icon="Warning" color="#ffb020" to="/env-devices" />
+      </el-col>
+      <el-col :span="6">
+        <StatCard label="未处理告警" :value="summary.open_alerts" icon="Bell" color="#ff4d5e" to="/alerts" :query="{ status: 'open' }" />
       </el-col>
     </el-row>
 
     <!-- 图表 -->
     <el-row :gutter="16" style="margin-top: 16px">
       <el-col :span="8">
-        <el-card class="tech-card tech-card--link" shadow="never" @click="goServers">
+        <el-card class="tech-card tech-card--link" shadow="never" @click="goServers()">
           <template #header>服务器状态分布 <span class="chart-hint">点击跳转</span></template>
           <TrendChart :option="serverPieOption" :height="260" :clickHandlers="serverChartClickHandlers" />
         </el-card>
@@ -108,21 +111,25 @@ const alerts = ref([])
 const recentAlerts = computed(() => alerts.value.slice(0, 8))
 
 // ---------- 跳转函数 ----------
-function goServers(status) {
-  router.push({ path: '/servers', query: status ? { status } : {} })
+function goServers(query) {
+  router.push({ path: '/servers', query: query || {} })
 }
 function goAlerts(query = {}) {
   router.push({ path: '/alerts', query })
 }
 
 // ---------- 图表点击处理 ----------
-// 服务器饼图点击: 点"在线"跳在线服务器, 点"离线"跳离线服务器
+// 服务器饼图点击: 点某分类带对应筛选条件跳去服务器列表
 const serverChartClickHandlers = [
   {
     name: 'click',
     fn: (params) => {
-      const map = { '在线': 'online', '离线': 'offline' }
-      goServers(map[params.name] || '')
+      const map = {
+        '在线': { status: 'online', enabled: 'true' },
+        '离线': { status: 'offline', enabled: 'true' },
+        '已暂停': { enabled: 'false' }
+      }
+      goServers(map[params.name] || {})
     }
   }
 ]
@@ -162,7 +169,8 @@ const serverPieOption = computed(() => ({
       label: { color: '#7d92b5' },
       data: [
         { value: summary.value.online, name: '在线', itemStyle: { color: '#00e396' } },
-        { value: summary.value.offline, name: '离线', itemStyle: { color: '#ff4d5e' } }
+        { value: summary.value.offline, name: '离线', itemStyle: { color: '#ff4d5e' } },
+        { value: summary.value.paused, name: '已暂停', itemStyle: { color: '#ffb020' } }
       ]
     }
   ]

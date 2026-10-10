@@ -9,9 +9,23 @@
     </div>
 
     <!-- vCenter 列表 -->
+    <div v-if="selectedRows.length" class="batch-bar">
+      <span class="batch-info">已选 <b>{{ selectedRows.length }}</b> 台</span>
+      <el-button size="small" type="warning" :loading="batching" @click="batchSet(false)">批量停用同步</el-button>
+      <el-button size="small" type="success" :loading="batching" @click="batchSet(true)">批量启用同步</el-button>
+      <el-button size="small" text @click="clearSelection">取消选择</el-button>
+    </div>
+
     <el-card class="tech-card" shadow="never">
       <template #header>vCenter / ESXi 主机</template>
-      <el-table :data="hosts" v-loading="loadingHosts">
+      <el-table
+        ref="tableRef"
+        :data="hosts"
+        v-loading="loadingHosts"
+        row-key="id"
+        @selection-change="(rows) => (selectedRows = rows)"
+      >
+        <el-table-column type="selection" width="50" />
         <el-table-column prop="id" label="ID" width="60" />
         <el-table-column prop="name" label="名称" min-width="140" />
         <el-table-column prop="host" label="地址" min-width="160" />
@@ -155,6 +169,9 @@ const dialogVisible = ref(false)
 const submitting = ref(false)
 const formRef = ref(null)
 const toggling = reactive({})
+const tableRef = ref(null)
+const selectedRows = ref([])
+const batching = ref(false)
 
 const form = reactive({
   name: '',
@@ -247,5 +264,50 @@ async function setMonitor(row, val) {
   }
 }
 
+// 批量暂停/恢复同步: 一次调用后端 /vmware/hosts/batch-enabled, 并更新本地行状态
+async function batchSet(enabled) {
+  const ids = selectedRows.value.map((r) => r.id)
+  if (!ids.length) return
+  batching.value = true
+  try {
+    const res = await vmwareApi.batchSetEnabled(ids, enabled)
+    const set = new Set(ids)
+    hosts.value.forEach((h) => {
+      if (set.has(h.id)) h.enabled = enabled
+    })
+    ElMessage.success(`已${enabled ? '启用' : '停用'} ${res.updated} 台主机同步`)
+    clearSelection()
+  } catch (e) {
+    ElMessage.error('批量操作失败: ' + ((e && e.message) || '未知错误'))
+  } finally {
+    batching.value = false
+  }
+}
+
+function clearSelection() {
+  tableRef.value?.clearSelection()
+  selectedRows.value = []
+}
+
 onMounted(loadAll)
 </script>
+
+<style scoped>
+.batch-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  margin-bottom: 14px;
+  background: rgba(47, 123, 255, 0.06);
+  border: 1px solid var(--border-tech);
+  border-radius: 6px;
+}
+.batch-bar .batch-info {
+  color: var(--text-sub);
+  font-size: 13px;
+}
+.batch-bar .batch-info b {
+  color: var(--accent, #00d4ff);
+}
+</style>

@@ -13,7 +13,7 @@ from app.models import (
 from app.schemas.schemas import (
     NetworkDeviceCreate, NetworkDeviceOut,
     StorageDeviceCreate, StorageDeviceOut,
-    PortRemarkIn, EnabledIn,
+    PortRemarkIn, EnabledIn, BatchEnabledIn,
 )
 from app.services.snmp_service import (
     collect_network_device, get_port_status,
@@ -79,6 +79,23 @@ async def toggle_network_enabled(
     await db.commit()
     await db.refresh(device)
     return device
+
+
+@router.post("/network/batch-enabled")
+async def batch_set_network_enabled(
+    data: BatchEnabledIn, db: AsyncSession = Depends(get_db)
+):
+    """批量暂停/恢复监测多台网络设备。"""
+    if not data.ids:
+        return {"ok": True, "updated": 0}
+    result = await db.execute(
+        select(NetworkDevice).where(NetworkDevice.id.in_(data.ids))
+    )
+    rows = result.scalars().all()
+    for d in rows:
+        d.enabled = data.enabled
+    await db.commit()
+    return {"ok": True, "updated": len(rows)}
 
 
 @router.post("/network/{device_id}/poll")
@@ -258,6 +275,23 @@ async def toggle_storage_enabled(
     await db.commit()
     await db.refresh(device)
     return device
+
+
+@router.post("/storage/batch-enabled")
+async def batch_set_storage_enabled(
+    data: BatchEnabledIn, db: AsyncSession = Depends(get_db)
+):
+    """批量暂停/恢复监测多台存储设备。"""
+    if not data.ids:
+        return {"ok": True, "updated": 0}
+    result = await db.execute(
+        select(StorageDevice).where(StorageDevice.id.in_(data.ids))
+    )
+    rows = result.scalars().all()
+    for d in rows:
+        d.enabled = data.enabled
+    await db.commit()
+    return {"ok": True, "updated": len(rows)}
 
 
 def _snmp_cred(device) -> object:

@@ -42,10 +42,19 @@
         </div>
       </div>
 
+      <div v-if="selectedRows.length" class="batch-bar">
+        <span class="batch-info">已选 <b>{{ selectedRows.length }}</b> 台</span>
+        <el-button size="small" type="warning" :loading="batching" @click="batchSet(false)">批量停用监测</el-button>
+        <el-button size="small" type="success" :loading="batching" @click="batchSet(true)">批量启用监测</el-button>
+        <el-button size="small" text @click="clearSelection">取消选择</el-button>
+      </div>
+
       <el-table
+        ref="tableRef"
         :data="devices" v-loading="loading" row-key="id"
         :expand-row-keys="expanded"
         @expand-change="onExpand"
+        @selection-change="(rows) => (selectedRows = rows)"
       >
         <el-table-column type="expand">
           <template #default="{ row }">
@@ -369,6 +378,9 @@ const pointsMap = reactive({})
 const expanded = ref([])
 const rowPolling = reactive({})
 const toggling = reactive({})
+const tableRef = ref(null)
+const selectedRows = ref([])
+const batching = ref(false)
 const meta = reactive({ categories: [], templates: {}, point_keys: [], function_codes: [], data_types: [] })
 
 const devVisible = ref(false)
@@ -586,6 +598,46 @@ async function setMonitor(row, val) {
   }
 }
 
+// 批量暂停/恢复监测: 动环设备没有独立批量接口, 循环调用 updateDevice 逐台更新 enabled
+async function batchSet(enabled) {
+  const rows = [...selectedRows.value]
+  if (!rows.length) return
+  batching.value = true
+  let ok = 0
+  try {
+    for (const row of rows) {
+      const payload = {
+        name: row.name,
+        category: row.category,
+        protocol: row.protocol,
+        ip: row.ip,
+        port: row.port,
+        slave_id: row.slave_id,
+        location: row.location || '',
+        cluster: row.cluster || '',
+        resource_group: row.resource_group || '',
+        poll_interval: row.poll_interval || 0,
+        enabled,
+        remark: row.remark || ''
+      }
+      await envDeviceApi.updateDevice(row.id, payload)
+      row.enabled = enabled
+      ok++
+    }
+    ElMessage.success(`已${enabled ? '启用' : '停用'} ${ok} 台设备监测`)
+    clearSelection()
+  } catch (e) {
+    ElMessage.error('批量操作失败: ' + ((e?.response?.data?.detail) || (e && e.message) || '未知错误'))
+  } finally {
+    batching.value = false
+  }
+}
+
+function clearSelection() {
+  tableRef.value?.clearSelection()
+  selectedRows.value = []
+}
+
 function openPoint(deviceRow, point) {
   ptDeviceId.value = deviceRow.id
   Object.assign(ptForm, point ? { ...point } : emptyPoint())
@@ -676,4 +728,13 @@ code { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
 .err { margin: 8px 0 0; font-size: 12px; color: var(--el-color-danger); }
 .test-result { margin-left: 12px; font-size: 13px; color: var(--el-color-success); }
 .test-result.bad { color: var(--el-color-danger); }
+.batch-bar {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 14px; margin-bottom: 14px;
+  background: rgba(47, 123, 255, 0.06);
+  border: 1px solid var(--border-tech);
+  border-radius: 6px;
+}
+.batch-bar .batch-info { color: var(--el-text-color-secondary); font-size: 13px; }
+.batch-bar .batch-info b { color: var(--el-color-primary); }
 </style>

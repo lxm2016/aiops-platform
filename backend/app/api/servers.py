@@ -12,7 +12,7 @@ from app.core.database import get_db
 from app.models import Server, ServerMetric, Alert
 from app.schemas.schemas import (
     ServerCreate, ServerOut, MetricReport, ServerMetricOut, ServerTestIn,
-    EnabledIn,
+    EnabledIn, BatchEnabledIn,
 )
 from app.services.alert_engine import (
     evaluate_server_metrics, evaluate_device_offline, flush_notifications,
@@ -30,6 +30,7 @@ async def list_servers(
     status: Optional[str] = None,
     os_type: Optional[str] = None,
     keyword: Optional[str] = None,
+    enabled: Optional[bool] = None,
     db: AsyncSession = Depends(get_db),
 ):
     stmt = select(Server)
@@ -39,6 +40,8 @@ async def list_servers(
         stmt = stmt.where(Server.os_type == os_type)
     if keyword:
         stmt = stmt.where(Server.name.contains(keyword) | Server.ip.contains(keyword))
+    if enabled is not None:
+        stmt = stmt.where(Server.enabled == enabled)
     result = await db.execute(stmt.order_by(Server.id))
     return result.scalars().all()
 
@@ -107,6 +110,20 @@ async def toggle_server_enabled(
     await db.refresh(server)
     invalidate_ip_cache()
     return server
+
+
+@router.post("/batch-enabled")
+async def batch_set_enabled(data: BatchEnabledIn, db: AsyncSession = Depends(get_db)):
+    """批量暂停/恢复监测多台服务器(配合前端列表复选框)。"""
+    if not data.ids:
+        return {"ok": True, "updated": 0}
+    result = await db.execute(select(Server).where(Server.id.in_(data.ids)))
+    rows = result.scalars().all()
+    for s in rows:
+        s.enabled = data.enabled
+    await db.commit()
+    invalidate_ip_cache()
+    return {"ok": True, "updated": len(rows)}
 
 
 @router.post("/{server_id}/diagnose")
@@ -332,11 +349,24 @@ async def report_metrics(
 
 @router.get("/stats/summary")
 async def summary(db: AsyncSession = Depends(get_db)):
-    """Dashboard summary stats."""
+    """Dashboard summary stats.
+
+    已暂停监测(enabled=False)的服务器: 不计入「离线」, 单独归入 paused。
+    这样在列表里把某台服务器设为「停用监测」后, 它不会再拉高离线数量 ——
+    否则就会出现"明明已暂停却还显示离线"的困惑(例如 50.177)。
+    """
     total = (await db.execute(select(func.count(Server.id)))).scalar() or 0
-    online = (await db.execute(
-        select(func.count(Server.id)).where(Server.status == "online")
+    enabled_count = (await db.execute(
+        select(func.count(Server.id)).where(Server.enabled == True)
     )).scalar() or 0
+    online = (await db.execute(
+        select(func.count(Server.id)).where(
+            Server.status == "online", Server.enabled == True
+        )
+    )).scalar() or 0
+    # 离线 = 在监测中(enabled)但状态不是 online 的服务器
+    offline = enabled_count - online
+    paused = total - enabled_count
     linux = (await db.execute(
         select(func.count(Server.id)).where(Server.os_type == "linux")
     )).scalar() or 0
@@ -347,6 +377,6 @@ async def summary(db: AsyncSession = Depends(get_db)):
         select(func.count(Alert.id)).where(Alert.status == "open")
     )).scalar() or 0
     return {
-        "total": total, "online": online, "offline": total - online,
+        "total": total, "online": online, "offline": offline, "paused": paused,
         "linux": linux, "windows": windows, "open_alerts": open_alerts,
     }
