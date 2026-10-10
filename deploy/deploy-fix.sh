@@ -40,14 +40,51 @@ echo "[1/9] 检查部署目录..."
 echo ""
 echo "[2/9] 备份现有代码与数据库..."
 mkdir -p "$DST/backup"
+
+# 部署前先看目标盘剩余空间: 空间不足时 cp 会直接卡死, 提前报警
+_avail_kb=$(df -Pk "$DST" 2>/dev/null | awk 'NR==2{print $4}')
+if [ -n "$_avail_kb" ] && [ "$_avail_kb" -lt 1048576 ]; then
+    echo "  [警告] 目标盘剩余空间 < 1GB (${_avail_kb}KB), 备份可能失败, 已自动清理旧备份腾空间"
+fi
+
+# 只保留最近 N 份同名备份, 删除更早的, 避免备份目录无限增长把磁盘写满
+# (磁盘写满会令 cp 阻塞, 表现为"卡在 [2/9]")
+prune_backups() {
+    local prefix="$1" keep=3
+    ls -1dt "$DST/backup/${prefix}"* 2>/dev/null | tail -n +$((keep + 1)) | while read -r _old; do
+        echo "    清理旧备份: $_old"
+        rm -rf "$_old"
+    done
+}
+
+# 备份失败绝不阻断部署: 用 if/else 包住, 不再受 set -e 影响
+# 数据库: 单文件, 加超时保护; 体积大时给出提示
 if [ -f "$DST/backend/aiops.db" ]; then
-    cp -f "$DST/backend/aiops.db" "$DST/backup/aiops_$TS.db"
-    echo "  数据库已备份 -> $DST/backup/aiops_$TS.db"
+    _dbsz=$(du -h "$DST/backend/aiops.db" 2>/dev/null | cut -f1)
+    echo "  正在备份数据库 (${_dbsz:-?})..."
+    if timeout 600 cp -f "$DST/backend/aiops.db" "$DST/backup/aiops_$TS.db" 2>/dev/null; then
+        echo "  数据库已备份 -> $DST/backup/aiops_$TS.db"
+    else
+        echo "  [警告] 数据库备份超时/失败, 跳过 (不影响本次部署)"
+    fi
+    prune_backups "aiops_"
 fi
+
+# 后端代码: 用 tar 打包并排除 __pycache__/*.pyc, 比 cp -rf 整目录更快、体积更小
+# 同样加超时, 避免极端情况下卡死
 if [ -d "$DST/backend/app" ]; then
-    cp -rf "$DST/backend/app" "$DST/backup/app_$TS"
-    echo "  后端代码已备份 -> $DST/backup/app_$TS"
+    echo "  正在打包后端代码 (排除 __pycache__)..."
+    if timeout 600 tar -cf "$DST/backup/app_$TS.tar" \
+            --exclude='__pycache__' --exclude='*.pyc' \
+            -C "$DST/backend" app 2>/dev/null; then
+        echo "  后端代码已备份 -> $DST/backup/app_$TS.tar ($(du -h "$DST/backup/app_$TS.tar" 2>/dev/null | cut -f1))"
+    else
+        echo "  [警告] 代码备份超时/失败, 跳过 (不影响本次部署)"
+    fi
+    prune_backups "app_"
 fi
+
+echo "  备份完成 (历史备份保留最近 3 份)"
 
 # ---------------------------------------------------------------------------
 echo ""
