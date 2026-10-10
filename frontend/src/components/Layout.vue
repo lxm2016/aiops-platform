@@ -91,6 +91,7 @@
 
 <script setup>
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { hasOpenModal } from '@/utils/dom'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { useAuthStore } from '@/stores/auth'
@@ -120,6 +121,12 @@ const downText = computed(() => {
 })
 
 function onBackendRestored() {
+  // 关键修复(2026-10): 后端恢复时原本会"强制重建当前路由组件"来刷新数据,
+  // 但若用户正在对话框里填写(如添加资产 / 编辑服务器), 重建会清空未提交表单、
+  // 关闭对话框 —— 即用户反馈的"资产还没添加完成就自动刷新退出了"。
+  // 这里先判断是否有模态层(对话框/抽屉/确认框)打开, 有则跳过重连刷新,
+  // 既保住用户正在填的内容, 也避免无关 Toast 打扰。
+  if (hasOpenModal()) return
   ElMessage.success('已重新连接服务器，正在刷新数据')
   refreshTick.value += 1
 }

@@ -10,12 +10,19 @@
 #    - 连续 FAIL_THRESHOLD 次探测失败(连接超时 / 返回非 200) -> 自动重启
 #    - 只重启一次后重新计数, 避免连环重启
 #
+#  探测端点: 默认用 /api/health/live (极轻量、不查库)。
+#    仅判断"进程/事件循环是否还活着", 不涉及数据库。
+#    这样数据库抖动/瞬时锁等待(会被 /api/health 标记为 degraded)绝不会
+#    触发重启 —— 否则重启本身会造成几秒的不可用, 前端随之判定"后端断开"
+#    并强制刷新页面, 反而打扰正在填写表单的用户。
+#    (如需沿用深度检查可设 AIOPS_HEALTH_URL 覆盖)
+#
 #  为什么还需要它: 定时任务崩溃、SNMP 库异常、磁盘写满、第三方库死锁 等
 #  情况无法在代码里 100% 排除, 看门狗是最后一道保险。
 # ===========================================================================
 set -u
 
-HEALTH_URL="${AIOPS_HEALTH_URL:-http://127.0.0.1:8080/api/health}"
+HEALTH_URL="${AIOPS_HEALTH_URL:-http://127.0.0.1:8080/api/health/live}"
 SERVICE_NAME="${AIOPS_SERVICE:-aiops-backend}"
 FAIL_THRESHOLD="${AIOPS_FAIL_THRESHOLD:-3}"
 BACKEND_DIR="${AIOPS_BACKEND_DIR:-/opt/aiops-deploy/backend}"

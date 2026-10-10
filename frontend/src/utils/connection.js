@@ -13,6 +13,7 @@
  */
 import { reactive } from 'vue'
 import axios from 'axios'
+import { ElMessage } from 'element-plus'
 
 const HEARTBEAT_INTERVAL = 30000   // 正常时 30 秒探活一次
 const RETRY_INTERVAL = 5000        // 异常时 5 秒重试一次
@@ -70,12 +71,17 @@ async function checkNow() {
     consecutiveFails += 1
     connState.failures = consecutiveFails
     if (consecutiveFails >= MAX_CONSECUTIVE_FAILURES) {
-      if (connState.online || connState.downSince === null) {
+      const wasOnline = connState.online
+      if (wasOnline || connState.downSince === null) {
         connState.downSince = Date.now()
       }
       connState.online = false
       connState.degraded = false
       connState.lastMessage = e?.message || '无法连接服务器'
+      // 判定离线的瞬间提示一次(每个 episode 只提示一次)
+      if (wasOnline && consumeDownToast()) {
+        ElMessage.error('服务器响应超时，正在自动重连…')
+      }
     }
     everDown = true
     return false
@@ -86,30 +92,26 @@ async function checkNow() {
 
 function schedule() {
   clearTimeout(timer)
-  const delay = connState.online ? HEARTBEAT_INTERVAL : RETRY_INTERVAL
+  // 有失败记录时加快探测节奏(5s), 完全健康时才回到 30s
+  const delay = (connState.online && connState.failures === 0) ? HEARTBEAT_INTERVAL : RETRY_INTERVAL
   timer = setTimeout(async () => {
     await checkNow()
     schedule()
   }, delay)
 }
 
-/** 业务请求判定为"后端不可用"时调用, 立即进入异常态并加快探测频率 */
+/**
+ * 业务请求失败(超时/连接错误)时调用。
+ * 关键改动: 【不再直接判定后端已死】—— 单个慢接口(如 SNMP 轮询 118 个口的
+ * 交换机)超时时, 后端其实活得好好的, 直接判离线会造成"页面数据明明正常
+ * 却弹重连提示"的误报。这里改为【立即发起一次健康探活来确认】:
+ *   探活成功 => 后端健在, 只是该请求自身失败, 不弹横幅/不弹 Toast;
+ *   探活失败 => 计入连续失败, 达到阈值(2 次)才判离线并提示一次。
+ */
 export function markBackendDown(reason) {
-  // 真正的业务请求失败(如 5xx/超时)是强信号, 立即判定离线,
-  // 但每个离线 episode 只提示一次(见 consumeDownToast)。
-  if (connState.online) {
-    connState.downSince = Date.now()
-    offlineToastShown = false   // 新的一次离线, 允许再提示一次
-  }
-  connState.online = false
-  connState.failures += 1
-  if (reason) connState.lastMessage = reason
   everDown = true
   clearTimeout(timer)
-  timer = setTimeout(async () => {
-    await checkNow()
-    schedule()
-  }, RETRY_INTERVAL)
+  Promise.resolve(checkNow()).finally(schedule)
 }
 
 export function startConnectionMonitor() {
