@@ -16,6 +16,13 @@
             <el-tag v-else size="small" type="warning" effect="plain">未配置模型</el-tag>
           </div>
           <div class="chat-actions">
+            <el-switch
+              v-model="agentMode"
+              class="agent-switch"
+              active-text="Agent 模式"
+              inactive-text="问答模式"
+              inline-prompt
+            />
             <el-button link type="primary" @click="openLlmDialog">
               <el-icon><Setting /></el-icon>&nbsp;模型配置
             </el-button>
@@ -55,6 +62,24 @@
             </el-icon>
           </div>
           <div class="bubble" :class="m.role === 'user' ? 'bubble-user' : 'bubble-ai'">
+            <!-- Agent 模式下的工具调用轨迹 -->
+            <div v-if="m.tools && m.tools.length" class="tool-trace">
+              <div class="tool-trace-head" @click="m._show = !m._show">
+                <el-icon class="tt-icon"><Cpu /></el-icon>
+                <span>工具调用 {{ m.tools.length }} 次（只读）</span>
+                <el-icon class="tt-caret"><ArrowDown v-if="!m._show" /><ArrowUp v-else /></el-icon>
+              </div>
+              <div v-show="m._show" class="tool-list">
+                <div v-for="(t, ti) in m.tools" :key="ti" class="tool-item">
+                  <span class="tool-name">{{ t.name }}</span>
+                  <span class="tool-args" v-if="t.arguments">{{ shortJson(t.arguments) }}</span>
+                  <span class="tool-badge" :class="t.ok ? 'ok' : 'fail'">{{ t.ok ? '✓' : '✗' }}</span>
+                  <div class="tool-summary" v-if="t.ok">{{ toolResultText(t) }}</div>
+                  <div class="tool-error" v-else>{{ t.error }}</div>
+                  <pre v-if="t.ok && t.result" class="tool-raw">{{ prettyJson(t.result) }}</pre>
+                </div>
+              </div>
+            </div>
             <div class="bubble-content">{{ m.content }}</div>
             <div class="bubble-time" v-if="m.time">{{ formatTime(m.time) }}</div>
           </div>
@@ -241,6 +266,7 @@
 <script setup>
 import { ref, reactive, computed, nextTick, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { Cpu, ArrowDown, ArrowUp } from '@element-plus/icons-vue'
 import { chatApi, settingsApi, serverApi } from '@/api'
 import { formatTime } from '@/utils/format'
 
@@ -251,6 +277,8 @@ const sending = ref(false)
 const bodyRef = ref(null)
 const selectedServer = ref(null)
 const serverOptions = ref([])
+// Agent 模式: 开=可执行(模型调用只读工具查询监控), 关=普通问答(仅注入监控上下文)
+const agentMode = ref(false)
 
 const quickQuestions = [
   '当前有哪些未处理的告警？',
@@ -299,18 +327,58 @@ async function send() {
   sending.value = true
   scrollToBottom()
   try {
-    const res = await chatApi.send(text, sessionId, selectedServer.value)
-    messages.value.push({ role: 'assistant', content: res.reply, time: new Date().toISOString() })
+    if (agentMode.value) {
+      const res = await chatApi.agent(text, sessionId, selectedServer.value)
+      messages.value.push({
+        role: 'assistant',
+        content: res.reply,
+        tools: res.tools_used || [],
+        _show: false,
+        time: new Date().toISOString(),
+      })
+    } else {
+      const res = await chatApi.send(text, sessionId, selectedServer.value)
+      messages.value.push({
+        role: 'assistant',
+        content: res.reply,
+        time: new Date().toISOString(),
+      })
+    }
   } catch (e) {
     messages.value.push({
       role: 'assistant',
       content: '抱歉，AI 服务暂时不可用，请稍后重试。',
-      time: new Date().toISOString()
+      time: new Date().toISOString(),
     })
   } finally {
     sending.value = false
     scrollToBottom()
   }
+}
+
+// ---------- 工具轨迹展示辅助 ----------
+function shortJson(obj) {
+  try {
+    const s = JSON.stringify(obj)
+    return s.length > 80 ? s.slice(0, 80) + '…' : s
+  } catch (e) {
+    return ''
+  }
+}
+function prettyJson(obj) {
+  try {
+    return JSON.stringify(obj, null, 2)
+  } catch (e) {
+    return String(obj)
+  }
+}
+function toolResultText(t) {
+  const r = t.result
+  if (!r) return ''
+  if (r.error) return '⚠ ' + r.error
+  if (typeof r.count === 'number') return `返回 ${r.count} 条`
+  if (r.ok === true) return r.os_type ? `只读诊断完成 (${r.os_type})` : '只读诊断/进程采集完成'
+  return '已返回数据'
 }
 
 async function loadServers() {
@@ -751,5 +819,98 @@ onMounted(() => {
 .send-btn {
   height: 52px;
   padding: 0 20px;
+}
+
+.agent-switch {
+  --el-switch-on-color: #00d4ff;
+}
+
+/* ---------- Agent 工具调用轨迹 ---------- */
+.tool-trace {
+  border: 1px dashed var(--border-tech);
+  border-radius: 8px;
+  margin-bottom: 8px;
+  background: rgba(0, 212, 255, 0.04);
+}
+
+.tool-trace-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  cursor: pointer;
+  font-size: 12px;
+  color: #00d4ff;
+  user-select: none;
+}
+
+.tt-icon {
+  color: #00d4ff;
+}
+
+.tt-caret {
+  margin-left: auto;
+}
+
+.tool-list {
+  padding: 0 10px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.tool-item {
+  font-size: 12px;
+  line-height: 1.5;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+  padding-top: 6px;
+}
+
+.tool-name {
+  color: #8be9fd;
+  font-family: monospace;
+  font-weight: 600;
+}
+
+.tool-args {
+  color: var(--text-sub);
+  font-family: monospace;
+  margin-left: 6px;
+}
+
+.tool-badge {
+  margin-left: 6px;
+  font-weight: 700;
+}
+
+.tool-badge.ok {
+  color: #4ade80;
+}
+
+.tool-badge.fail {
+  color: #f87171;
+}
+
+.tool-summary {
+  color: var(--text-sub);
+  margin-top: 2px;
+}
+
+.tool-error {
+  color: #f87171;
+  margin-top: 2px;
+}
+
+.tool-raw {
+  margin: 4px 0 0;
+  max-height: 200px;
+  overflow: auto;
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 11px;
+  color: #cde;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 </style>

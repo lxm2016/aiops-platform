@@ -272,6 +272,9 @@ export const notifyApi = {
 export const chatApi = {
   send: (message, session_id = 'default', server_id = null) =>
     http.post('/chat', { message, session_id, server_id }, { timeout: 180000 }),
+  // 可执行 Agent: 模型可调用只读工具查询监控数据, 返回 {reply, session_id, tools_used}
+  agent: (message, session_id = 'default', server_id = null) =>
+    http.post('/chat/agent', { message, session_id, server_id }, { timeout: 180000 }),
   history: (session_id) => http.get(`/chat/history/${session_id}`)
 }
 

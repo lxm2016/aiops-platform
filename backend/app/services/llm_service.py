@@ -281,6 +281,49 @@ async def chat_completion(
         return f"无法连接【{prov}】服务（{_runtime['base_url']}）：{e}\n请确认模型服务已启动且地址/模型名正确。"
 
 
+async def chat_with_tools(
+    messages: List[dict],
+    tools: List[dict],
+    tool_choice: str = "auto",
+    temperature: float = 0.3,
+) -> "object":
+    """调用支持 function-calling 的模型 (OpenAI 兼容协议)。
+
+    用于「可执行 Agent」: 模型可在回复中携带 tool_calls, 由调用方执行工具后
+    把结果回填, 再进入下一轮。返回的是原始的 chat.completions 响应对象
+    (含 choices[0].message.tool_calls), 由调用方自行解析。
+
+    若底层 provider 不支持 tools 或调用失败, 返回的对象 message 不带 tool_calls,
+    调用方据此退化为普通问答即可。
+    """
+    client = _get_client()
+    try:
+        resp = await client.chat.completions.create(
+            model=_runtime["model"],
+            messages=messages,
+            tools=tools,
+            tool_choice=tool_choice,
+            temperature=temperature,
+            max_tokens=2048,
+        )
+        return resp
+    except Exception as e:
+        prov = PROVIDERS.get(_runtime["provider"], {}).get("label", "大模型")
+        # 返回一个伪响应, 让上层把错误转成一句提示, 而不是直接崩
+        class _Msg:
+            tool_calls = None
+            content = (
+                f"无法连接【{prov}】服务（{_runtime['base_url']}）：{e}\n"
+                "请确认模型服务已启动且地址/模型名正确；"
+                "若所用模型不支持工具调用, 请改用支持 function calling 的模型。"
+            )
+        class _Choice:
+            message = _Msg()
+        class _FakeResp:
+            choices = [_Choice()]
+        return _FakeResp()
+
+
 async def test_connection(base_url: str, api_key: str, model: str) -> Tuple[bool, str]:
     """用指定配置实际调用一次模型, 验证连通性。"""
     try:

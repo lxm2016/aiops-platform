@@ -443,6 +443,29 @@ class ChatResponse(BaseModel):
     session_id: str
 
 
+# ---------- 可执行 Agent (工具调用) ----------
+class AgentRequest(BaseModel):
+    message: str
+    session_id: str = "default"
+    # 可选：关联一台服务器（仅作为上下文, Agent 仍可调用工具获取更全面数据）
+    server_id: Optional[int] = None
+
+
+class AgentToolTrace(BaseModel):
+    name: str
+    arguments: Optional[dict] = None
+    ok: bool = True
+    result: Optional[dict] = None
+    error: Optional[str] = None
+
+
+class AgentResponse(BaseModel):
+    reply: str
+    session_id: str
+    # 工具调用轨迹, 供前端展示"AI 做了哪些只读查询"
+    tools_used: List[AgentToolTrace] = []
+
+
 # ---------- Rack ----------
 class RackCreate(BaseModel):
     name: str

@@ -1,13 +1,18 @@
 """AI assistant chat API backed by internal Qwen model."""
+import logging
+
 from fastapi import APIRouter, Depends
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.models import ChatMessage, Server, Alert, NetworkDevice, EnvSensor
-from app.schemas.schemas import ChatRequest, ChatResponse
+from app.schemas.schemas import ChatRequest, ChatResponse, AgentRequest, AgentResponse
 from app.services.llm_service import chat_completion
 from app.services import diagnostic_service
+from app.services import agent_service
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
@@ -16,12 +21,23 @@ async def _build_monitoring_context(db: AsyncSession) -> str:
     """Build a compact snapshot of current platform state for the LLM."""
     parts = []
 
-    # Server summary
+    # Server summary —— 注意: 离线数只统计【启用监测】的设备,
+    # 已暂停监测(enabled=False)的设备不计入离线(避免误报)。与 servers.summary() 一致。
     total = (await db.execute(select(func.count(Server.id)))).scalar() or 0
-    online = (await db.execute(
-        select(func.count(Server.id)).where(Server.status == "online")
+    enabled_count = (await db.execute(
+        select(func.count(Server.id)).where(Server.enabled == True)
     )).scalar() or 0
-    parts.append(f"服务器总数: {total}, 在线: {online}, 离线: {total - online}")
+    online = (await db.execute(
+        select(func.count(Server.id)).where(
+            Server.status == "online", Server.enabled == True
+        )
+    )).scalar() or 0
+    offline = enabled_count - online
+    paused = total - enabled_count
+    parts.append(
+        f"服务器总数: {total}, 在线: {online}, 离线(已启用监测中): {offline}, "
+        f"已暂停监测: {paused}"
+    )
 
     # Open alerts (top 5)
     result = await db.execute(
@@ -90,6 +106,37 @@ async def chat(req: ChatRequest, db: AsyncSession = Depends(get_db)):
     await db.commit()
 
     return ChatResponse(reply=reply, session_id=req.session_id)
+
+
+@router.post("/agent", response_model=AgentResponse)
+async def agent_chat(req: AgentRequest, db: AsyncSession = Depends(get_db)):
+    """可执行 Agent: 通过 function-calling 调用只读工具查询监控数据后作答。
+
+    与 /chat 的区别: 模型可主动调用工具 (list_servers / list_alerts / diagnose_server ...),
+    所有工具均为只读, 无法修改系统。返回最终回答 + 工具调用轨迹 (供前端展示)。
+    """
+    # 加载历史, 保证多轮连贯
+    result = await db.execute(
+        select(ChatMessage)
+        .where(ChatMessage.session_id == req.session_id)
+        .order_by(ChatMessage.id.desc())
+        .limit(10)
+    )
+    history_msgs = list(reversed(result.scalars().all()))
+    history = [{"role": m.role, "content": m.content} for m in history_msgs]
+
+    reply, tool_trace = await agent_service.run_agent(req.message, history=history, db=db)
+
+    # 落库: 用户提问 + Agent 最终回答 (工具轨迹不入库, 仅本次返回)
+    db.add(ChatMessage(session_id=req.session_id, role="user", content=req.message))
+    db.add(ChatMessage(session_id=req.session_id, role="assistant", content=reply))
+    await db.commit()
+
+    return AgentResponse(
+        reply=reply,
+        session_id=req.session_id,
+        tools_used=tool_trace,
+    )
 
 
 @router.get("/history/{session_id}")
