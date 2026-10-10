@@ -15,7 +15,7 @@
 import logging
 import sqlite3
 
-from sqlalchemy import event, text
+from sqlalchemy import JSON, Boolean, DateTime, Float, Integer, event, text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.pool import NullPool, AsyncAdaptedQueuePool
@@ -117,87 +117,89 @@ async def ping_db() -> bool:
         return False
 
 
+def _column_ddl(col):
+    """按 SQLAlchemy 列定义推导 SQLite 列 DDL (含默认值)。"""
+    t = col.type
+    if isinstance(t, Boolean):
+        sql_t = "BOOLEAN"
+    elif isinstance(t, Integer):
+        sql_t = "INTEGER"
+    elif isinstance(t, Float):
+        sql_t = "REAL"
+    elif isinstance(t, DateTime):
+        sql_t = "DATETIME"
+    else:
+        # String / Text / JSON 等在 SQLite 里都落为 TEXT
+        sql_t = "TEXT"
+
+    ddl = f'"{col.name}" {sql_t}'
+    # 标量默认值才可安全加列(SQLite 对存量行要求有默认值); 可调用默认(datetime.utcnow)不行
+    if (
+        col.default is not None
+        and getattr(col.default, "is_scalar", False)
+        and not callable(col.default.arg)
+    ):
+        v = col.default.arg
+        if isinstance(v, bool):
+            v = int(v)
+        if isinstance(v, str):
+            v = "'" + v.replace("'", "''") + "'"
+        ddl += f" DEFAULT {v}"
+    return ddl
+
+
 def _migrate_sqlite():
-    """SQLite不支持ALTER COLUMN, 这里对存量库补新增列 (幂等)。"""
+    """存量库自动补列 (幂等, 通用)。
+
+    背景(2026-10-10 修复): 旧版这里手写了一张 "表 -> 新增列" 字典,
+    结果 `storage_devices` 这个 key 被写了两次, Python 字典重复 key
+    后者覆盖前者, `enabled` 列的迁移被静默丢掉 —— 线上老库缺列导致
+    存储设备列表查询 500 (页面表现为"之前添加的华为存储没了")、
+    新增 INSERT 报 "table storage_devices has no column named enabled"。
+    同类地雷还有 env_devices / env_points / notify_channels 的 enabled。
+
+    教训: 手写映射必然漏。现在直接遍历 ORM 元数据(Base.metadata),
+    与 PRAGMA table_info 对比, 缺哪列补哪列, 以后加列只改模型即可。
+    """
     if not _IS_SQLITE:
         return
+    from app import models  # noqa: F401 - 确保所有模型已注册到 Base.metadata
+
     db_path = settings.database_url.split("///")[-1]
     conn = sqlite3.connect(db_path)
     try:
         cur = conn.cursor()
-        for table, columns in {
-            "switch_ports": [("physical", "INTEGER DEFAULT 1")],
-            "servers": [
-                ("diag_user", "VARCHAR(128) DEFAULT ''"),
-                ("diag_password", "VARCHAR(256) DEFAULT ''"),
-                ("diag_port", "INTEGER DEFAULT 22"),
-                # 监测开关: False=暂停监测(不采集/不告警/不标离线)
-                ("enabled", "BOOLEAN DEFAULT 1"),
-            ],
-            "network_devices": [
-                ("enabled", "BOOLEAN DEFAULT 1"),
-            ],
-            "storage_devices": [
-                ("enabled", "BOOLEAN DEFAULT 1"),
-            ],
-            "vmware_hosts": [
-                ("enabled", "BOOLEAN DEFAULT 1"),
-            ],
-            "alerts": [            # 可配置告警规则改造新增的列
-                ("rule_id", "INTEGER"),
-                ("metric", "TEXT DEFAULT ''"),
-                ("value", "REAL"),
-                ("hit_count", "INTEGER DEFAULT 1"),
-                ("last_notify_at", "DATETIME"),
-                ("last_notify_level", "TEXT"),
-                ("updated_at", "DATETIME"),
-            ],
-            "notify_channels": [    # 短信/电话渠道: 被叫号码独立成一列, 模板里用变量引用
-                ("targets", "TEXT DEFAULT ''"),
-                # 短信平台网关鉴权: 账号(accName) + 密码(发送时按平台做 MD5 大写 -> {accPwd})
-                ("account", "VARCHAR(128) DEFAULT ''"),
-                ("password", "VARCHAR(256) DEFAULT ''"),
-            ],
-            "env_points": [         # 动环点位: 分组字段(科士达UPS等多点位设备分类显示)
-                # group 是 SQLite 保留字, 必须带双引号
-                ('"group"', "VARCHAR(32) DEFAULT ''"),
-            ],
-            "storage_devices": [
-                ("protocol", "TEXT DEFAULT 'none'"),
-                ("snmp_community", "TEXT DEFAULT 'public'"),
-                ("snmp_version", "TEXT DEFAULT '2c'"),
-                ("username", "TEXT DEFAULT ''"),
-                ("password", "TEXT DEFAULT ''"),
-                ("details", "TEXT DEFAULT '{}'"),
-                # 华为 OceanStor 默认关闭 SNMPv1&v2c 开关, 只留 USM 用户,
-                # 所以监控这类存储必须能走 v3
-                ("snmp_v3_user", "TEXT DEFAULT ''"),
-                ("snmp_v3_auth_proto", "TEXT DEFAULT 'sha'"),
-                ("snmp_v3_auth_pass", "TEXT DEFAULT ''"),
-                ("snmp_v3_priv_proto", "TEXT DEFAULT 'aes'"),
-                ("snmp_v3_priv_pass", "TEXT DEFAULT ''"),
-                ("snmp_context", "TEXT DEFAULT ''"),
-            ],
-        }.items():
-            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,))
+        for table in Base.metadata.sorted_tables:
+            cur.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                (table.name,),
+            )
             if not cur.fetchone():
-                continue  # 新库由create_all建表
-            cur.execute(f"PRAGMA table_info({table})")
+                continue  # 新库由 create_all 建表, 无需补列
+            cur.execute(f'PRAGMA table_info("{table.name}")')
             existing = {row[1] for row in cur.fetchall()}
-            for col, ddl in columns:
-                # col 可能带双引号(如 "group", SQLite 保留字), 必须去引号后再与
-                # PRAGMA 返回的列名比较, 否则 '"group"' 永远匹配不到现有列 'group',
-                # 会让重复 ALTER 报 "duplicate column name" 并导致后端启动失败。
-                col_unquoted = col.strip('"')
-                if col_unquoted in existing:
+            for col in table.columns:
+                if col.name in existing:
                     continue
+                if not col.nullable and not (
+                    col.default is not None
+                    and getattr(col.default, "is_scalar", False)
+                ):
+                    # 非空且无默认值的列无法安全补(存量行没值), 理论上不应出现
+                    logger.warning(
+                        f"[DB] 迁移跳过 {table.name}.{col.name}: 非空且无默认值"
+                    )
+                    continue
+                ddl = _column_ddl(col)
                 try:
-                    cur.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
-                    logger.info(f"[DB] 迁移: {table} 新增列 {col_unquoted}")
+                    cur.execute(f'ALTER TABLE "{table.name}" ADD COLUMN {ddl}')
+                    logger.info(f"[DB] 迁移: {table.name} 新增列 {col.name}")
                 except sqlite3.OperationalError as e:
                     # 并发/重复部署等极端情况下, 列可能已被其它进程加上
                     if "duplicate column" in str(e).lower():
-                        logger.warning(f"[DB] 迁移: {table}.{col_unquoted} 已存在, 跳过")
+                        logger.warning(
+                            f"[DB] 迁移: {table.name}.{col.name} 已存在, 跳过"
+                        )
                     else:
                         raise
 
