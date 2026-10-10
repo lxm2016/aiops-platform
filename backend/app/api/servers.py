@@ -1,5 +1,7 @@
 """Server monitoring API: CRUD + agent metric ingestion + history."""
+import json
 import logging
+import os
 from datetime import datetime, timedelta
 from typing import List, Optional
 
@@ -23,6 +25,110 @@ from app.services import diagnostic_service
 router = APIRouter(prefix="/api/servers", tags=["servers"])
 settings = get_settings()
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# 一键登记 DGX: 尽量自动带出 DGX 的 IP 与 SSH 凭据模板
+# ---------------------------------------------------------------------------
+# dgx-onboard.sh 纳管成功后写入的状态文件(多候选路径, 顺序取第一个存在的)
+DGX_STATE_CANDIDATES = [
+    "/var/lib/aiops/dgx-state.json",
+    "/opt/aiops-deploy/dgx-state.json",
+    os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "dgx-state.json",
+    ),
+]
+
+
+def _read_dgx_state() -> dict:
+    for path in DGX_STATE_CANDIDATES:
+        try:
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if data.get("dgx_ip"):
+                    return data
+        except Exception:
+            continue
+    return None
+
+
+@router.get("/dgx-template")
+async def dgx_template(db: AsyncSession = Depends(get_db)):
+    """一键登记 DGX 的引导模板。
+
+    优先级:
+      1) dgx-onboard.sh 写入的状态文件(含 DGX IP + 用户 + 端口);
+      2) 已自动上报(agent_installed)但还没配置诊断凭据的在线服务器(多半是刚纳管的 DGX);
+      3) 兜底默认值(用户=nvidia, 端口=22)。
+    """
+    default = {
+        "ip": "", "name": "DGX-Spark-01", "os_type": "linux",
+        "diag_user": "nvidia", "diag_port": 22, "source": "default",
+        "hint": "运行 tools/dgx-onboard.sh 纳管后, 这里会自动带出 DGX 的 IP; 也可手动填写。",
+    }
+    # 1) 纳管脚本写入的状态文件
+    state = _read_dgx_state()
+    if state:
+        return {
+            "ip": state.get("dgx_ip", ""),
+            "name": state.get("dgx_name") or "DGX-Spark-01",
+            "os_type": "linux",
+            "diag_user": state.get("dgx_user") or "nvidia",
+            "diag_port": state.get("dgx_port") or 22,
+            "source": "onboard-state",
+            "hint": f"来自 DGX 纳管记录 (onboarded_at={state.get('onboarded_at', '')})",
+        }
+    # 2) 找一台"已装 Agent 但还没配诊断凭据"的在线服务器(大概率是 DGX)
+    result = await db.execute(
+        select(Server)
+        .where(Server.agent_installed == True, Server.status == "online")
+        .where((Server.diag_user == None) | (Server.diag_user == ""))
+        .order_by(Server.last_seen.desc())
+        .limit(1)
+    )
+    s = result.scalar_one_or_none()
+    if s:
+        return {
+            "ip": s.ip,
+            "name": s.name or "DGX-Spark-01",
+            "os_type": s.os_type or "linux",
+            "diag_user": "nvidia",
+            "diag_port": s.diag_port or 22,
+            "source": "auto-detected",
+            "hint": "已检测到一台上报中的 DGX/服务器, IP 已自动带出, 请补全 SSH 凭据。",
+        }
+    return default
+
+
+@router.post("/dgx-onboard-notify")
+async def dgx_onboard_notify(
+    payload: dict,
+    x_agent_token: Optional[str] = Header(default=None),
+):
+    """dgx-onboard.sh 纳管成功后回调: 把 DGX 的 IP/凭据模板登记到平台,
+    供前端「一键登记 DGX」向导自动带出。与 /report 共用 agent_token。"""
+    if x_agent_token != settings.agent_token:
+        raise HTTPException(status_code=401, detail="Agent令牌无效")
+    data = payload or {}
+    dgx_ip = data.get("dgx_ip")
+    if not dgx_ip:
+        raise HTTPException(status_code=400, detail="缺少 dgx_ip")
+    state = {
+        "dgx_ip": dgx_ip,
+        "dgx_name": data.get("dgx_name") or "DGX-Spark-01",
+        "dgx_user": data.get("dgx_user") or "nvidia",
+        "dgx_port": data.get("dgx_port") or 22,
+        "onboarded_at": datetime.utcnow().isoformat(),
+    }
+    try:
+        os.makedirs("/var/lib/aiops", exist_ok=True)
+        with open("/var/lib/aiops/dgx-state.json", "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.warning(f"[DGX] 写状态文件失败(非致命): {e}")
+    return {"ok": True}
 
 
 @router.get("", response_model=List[ServerOut])

@@ -29,6 +29,8 @@ logger = logging.getLogger(__name__)
 
 AGENT_SYSTEM_PROMPT = """你是一个可执行的数据中心运维 Agent（AIOps 助手）。你能通过一组【只读】工具实时查询平台监控数据：
 - 服务器 / 网络设备 / 存储 / VMware / 动环设备 的清单与状态
+- VMware 虚拟机清单(电源状态/资源占用)、存储设备的存储池/磁盘/卷利用率明细
+- 全局概览(服务器/虚拟机/存储/告警 数量)
 - 未处理告警
 - 单台服务器的实时指标、只读诊断（CPU/内存/磁盘/进程）、进程列表
 
@@ -173,6 +175,43 @@ TOOLS = [
                 },
                 "required": ["server_id"],
             },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_vms",
+            "description": "列出 VMware 虚拟机清单(可按宿主机/电源状态过滤): 名称、电源状态、客户机系统、IP、CPU/内存占用、所属宿主机。用于回答“某 vCenter 下有哪些虚机/有多少台开机”等问题。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "host_id": {"type": "integer", "description": "只看某台 vCenter/ESXi 下的虚拟机"},
+                    "power_state": {"type": "string", "enum": ["poweredOn", "poweredOff", "suspended"],
+                                    "description": "按电源状态过滤, 留空=全部"},
+                    "limit": {"type": "integer", "description": "最多返回条数, 默认 50"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_storage_details",
+            "description": "查看存储设备(如华为/新华三/Sangfor)的存储池/磁盘/卷明细与利用率(used_percent)。用于回答“某存储阵列容量还剩多少/哪个池快满/磁盘健康”等问题。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "storage_id": {"type": "integer", "description": "指定存储设备 id; 留空=返回全部"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_summary",
+            "description": "获取全局概览: 服务器总数/在线/离线、虚拟机数、存储设备数、未处理告警数。用于回答“整体情况/一共有多少设备/有多少未处理告警”类问题。",
+            "parameters": {"type": "object", "properties": {}},
         },
     },
 ]
@@ -330,6 +369,92 @@ async def _tool_processes(db: AsyncSession, server_id, top=15):
             "processes": procs}
 
 
+async def _tool_list_vms(db: AsyncSession, host_id=None, power_state=None, limit=50):
+    stmt = select(VirtualMachine)
+    if host_id:
+        stmt = stmt.where(VirtualMachine.host_id == host_id)
+    if power_state:
+        stmt = stmt.where(VirtualMachine.power_state == power_state)
+    stmt = stmt.order_by(VirtualMachine.host_id, VirtualMachine.name).limit(int(limit or 50))
+    rows = (await db.execute(stmt)).scalars().all()
+    return {
+        "count": len(rows),
+        "vms": [
+            {"id": v.id, "name": v.name, "host_id": v.host_id, "power_state": v.power_state,
+             "guest_os": v.guest_os, "ip": v.ip, "cpu_cores": v.cpu_cores, "mem_mb": v.mem_mb,
+             "cpu_percent": v.cpu_percent, "mem_percent": v.mem_percent, "uptime": v.uptime,
+             "last_seen": v.last_seen}
+            for v in rows
+        ],
+    }
+
+
+def _pct(used, total):
+    try:
+        if used is None or total in (None, 0):
+            return None
+        return round(used / total * 100, 1)
+    except Exception:
+        return None
+
+
+def _agg_detail(items):
+    out = []
+    for it in (items or []):
+        if not isinstance(it, dict):
+            continue
+        used = it.get("used")
+        total = it.get("total")
+        used_percent = it.get("used_percent")
+        if used_percent is None:
+            used_percent = _pct(used, total)
+        out.append({
+            "name": it.get("name") or it.get("id") or it.get("pool_name") or "?",
+            "used_percent": used_percent,
+            "total": total,
+            "used": used,
+            "status": it.get("status"),
+        })
+    return out
+
+
+async def _tool_storage_details(db: AsyncSession, storage_id=None):
+    stmt = select(StorageDevice)
+    if storage_id:
+        stmt = stmt.where(StorageDevice.id == storage_id)
+    rows = (await db.execute(stmt)).scalars().all()
+    out = []
+    for d in rows:
+        details = d.details or {}
+        out.append({
+            "id": d.id, "name": d.name, "ip": d.ip, "vendor": d.vendor, "model": d.model,
+            "status": d.status, "capacity_tb": d.capacity_tb, "used_percent": d.used_percent,
+            "pools": _agg_detail(details.get("pools")),
+            "disks": _agg_detail(details.get("disks")),
+            "volumes": _agg_detail(details.get("volumes")),
+        })
+    return {"count": len(out), "storage": out}
+
+
+async def _tool_summary(db: AsyncSession):
+    total = (await db.execute(select(func.count(Server.id)))).scalar() or 0
+    online = (await db.execute(
+        select(func.count(Server.id)).where(Server.status == "online", Server.enabled == True)
+    )).scalar() or 0
+    offline = (await db.execute(
+        select(func.count(Server.id)).where(Server.status != "online", Server.enabled == True)
+    )).scalar() or 0
+    vms = (await db.execute(select(func.count(VirtualMachine.id)))).scalar() or 0
+    storages = (await db.execute(select(func.count(StorageDevice.id)))).scalar() or 0
+    open_alerts = (await db.execute(
+        select(func.count(Alert.id)).where(Alert.status == "open")
+    )).scalar() or 0
+    return {
+        "servers": {"total": total, "online": online, "offline": offline},
+        "vms": vms, "storages": storages, "open_alerts": open_alerts,
+    }
+
+
 async def dispatch_tool(name: str, args: dict, db: AsyncSession) -> dict:
     """执行单个工具, 返回可 JSON 序列化的结果字典。"""
     args = args or {}
@@ -354,6 +479,12 @@ async def dispatch_tool(name: str, args: dict, db: AsyncSession) -> dict:
         return await _tool_diagnose(db, args.get("server_id"))
     if name == "list_processes":
         return await _tool_processes(db, args.get("server_id"), args.get("top", 15))
+    if name == "list_vms":
+        return await _tool_list_vms(db, args.get("host_id"), args.get("power_state"), args.get("limit", 50))
+    if name == "get_storage_details":
+        return await _tool_storage_details(db, args.get("storage_id"))
+    if name == "get_summary":
+        return await _tool_summary(db)
     return {"error": f"未知工具: {name}"}
 
 

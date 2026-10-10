@@ -171,6 +171,22 @@ else
   (cd "$INSTALL_DIR" && nohup "$PY" agent.py >/dev/null 2>&1 &)
 fi
 
+# ---------------- 通知平台本机 DGX 地址(供 Web「一键登记 DGX」向导自动带出) ----------------
+echo "通知平台本机 DGX 地址..."
+DGX_LOCAL_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+DGX_NAME="$(hostname 2>/dev/null)"
+NOTIFY_BODY="{\"dgx_ip\":\"${DGX_LOCAL_IP}\",\"dgx_name\":\"${DGX_NAME}\",\"dgx_user\":\"nvidia\",\"dgx_port\":22}"
+if command -v curl >/dev/null 2>&1; then
+  curl -sSfL -X POST "$SERVER/api/servers/dgx-onboard-notify" \
+    -H "Content-Type: application/json" -H "x-agent-token: $TOKEN" \
+    -d "$NOTIFY_BODY" >/dev/null 2>&1 \
+    && echo "      已上报平台: $DGX_LOCAL_IP" || echo "      [警告] 上报失败(不影响 Agent 运行)"
+elif command -v wget >/dev/null 2>&1; then
+  wget -q --header="Content-Type: application/json" --header="x-agent-token: $TOKEN" \
+    --post-data="$NOTIFY_BODY" "$SERVER/api/servers/dgx-onboard-notify" -O /dev/null 2>&1 \
+    && echo "      已上报平台: $DGX_LOCAL_IP" || echo "      [警告] 上报失败(不影响 Agent 运行)"
+fi
+
 # ---------------- 6) 验证 ----------------
 echo "[6/6] 验证 Agent 进程..."
 sleep 3

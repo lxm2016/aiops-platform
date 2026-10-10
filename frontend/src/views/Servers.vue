@@ -13,6 +13,7 @@
           @clear="load"
         />
         <el-button type="primary" :icon="Plus" @click="dialogVisible = true">添加服务器</el-button>
+        <el-button type="success" :icon="Cpu" @click="openDgxWizard">一键登记 DGX</el-button>
         <el-button :icon="Refresh" @click="load">刷新</el-button>
       </div>
     </div>
@@ -90,11 +91,7 @@
               详情
             </el-button>
             <el-button link type="primary" @click="openEdit(row)">编辑</el-button>
-            <el-popconfirm title="确定删除该服务器？" @confirm="handleDelete(row)">
-              <template #reference>
-                <el-button link type="danger">删除</el-button>
-              </template>
-            </el-popconfirm>
+            <el-button link type="danger" @click="confirmDelete(row)">删除</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -161,6 +158,45 @@
         <el-button type="primary" :loading="submitting" @click="handleSubmit">确定</el-button>
       </template>
     </el-dialog>
+
+    <!-- 一键登记 DGX 引导弹窗 -->
+    <el-dialog v-model="dgxVisible" title="一键登记 DGX" width="520px">
+      <el-alert :title="dgxHint" type="info" :closable="false" style="margin-bottom: 14px" />
+      <el-form :model="dgxForm" label-width="96px">
+        <el-form-item label="名称" required>
+          <el-input v-model="dgxForm.name" placeholder="如 DGX-Spark-01" />
+        </el-form-item>
+        <el-form-item label="IP 地址" required>
+          <el-input v-model="dgxForm.ip" placeholder="DGX 管理/业务 IP" />
+        </el-form-item>
+        <el-form-item label="系统类型">
+          <el-select v-model="dgxForm.os_type" style="width: 100%">
+            <el-option label="Linux" value="linux" />
+            <el-option label="Windows" value="windows" />
+          </el-select>
+        </el-form-item>
+        <el-divider content-position="left">DGX SSH 凭据模板（只读诊断用）</el-divider>
+        <el-form-item label="登录用户">
+          <el-input v-model="dgxForm.diag_user" placeholder="DGX 默认 nvidia" />
+        </el-form-item>
+        <el-form-item label="登录密码">
+          <el-input
+            v-model="dgxForm.diag_password"
+            type="password"
+            show-password
+            placeholder="DGX SSH 密码（留空表示暂不填）"
+          />
+        </el-form-item>
+        <el-form-item label="端口">
+          <el-input-number v-model="dgxForm.diag_port" :min="1" :max="65535" />
+          <div class="form-tip">Linux SSH 默认 22</div>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="dgxVisible = false">取消</el-button>
+        <el-button type="success" :loading="submittingDgx" @click="registerDgx">登记 DGX</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -187,8 +223,8 @@
 <script setup>
 import { ref, reactive, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { ElMessage } from 'element-plus'
-import { Plus, Refresh, Search } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { Plus, Refresh, Search, Cpu } from '@element-plus/icons-vue'
 import { serverApi } from '@/api'
 import { formatTime, statusTagType, statusLabel } from '@/utils/format'
 
@@ -208,6 +244,16 @@ const selectedRows = ref([])
 const batching = ref(false)
 const filterStatus = ref('')
 const filterEnabled = ref(null)
+
+// ---- 一键登记 DGX 引导弹窗 ----
+const dgxVisible = ref(false)
+const submittingDgx = ref(false)
+const dgxHint = ref('')
+const DGX_EMPTY = {
+  name: 'DGX-Spark-01', ip: '', os_type: 'linux',
+  diag_user: 'nvidia', diag_password: '', diag_port: 22,
+}
+const dgxForm = reactive({ ...DGX_EMPTY })
 
 const EMPTY_FORM = {
   name: '',
@@ -357,10 +403,82 @@ async function handleTestConn() {
   }
 }
 
-async function handleDelete(row) {
-  await serverApi.remove(row.id)
-  ElMessage.success('删除成功')
-  load()
+// 删除: 显式确认 + 错误提示, 避免"点删除没反应"(失败被静默吞掉)
+async function confirmDelete(row) {
+  try {
+    await ElMessageBox.confirm(
+      `确定删除服务器「${row.name}」(${row.ip}) 吗？\n将一并删除其历史指标数据，且不可恢复。`,
+      '删除服务器',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消',
+        confirmButtonClass: 'el-button--danger' }
+    )
+    await doDelete(row)
+  } catch (e) {
+    // 用户取消/关闭对话框 -> 静默忽略; 真正的删除错误由 doDelete 内部提示
+    if (e === 'cancel' || e === 'close') return
+  }
+}
+
+async function doDelete(row) {
+  try {
+    await serverApi.remove(row.id)
+    ElMessage.success('删除成功')
+    load()
+  } catch (e) {
+    const detail = e?.response?.data?.detail || e?.message || '未知错误'
+    ElMessage.error('删除失败: ' + detail)
+  }
+}
+
+// ---- 一键登记 DGX: 拉取模板(尽量自动带出 IP 与 SSH 凭据)并打开向导 ----
+async function openDgxWizard() {
+  Object.assign(dgxForm, DGX_EMPTY)
+  dgxHint.value = ''
+  try {
+    const tpl = await serverApi.dgxTemplate()
+    Object.assign(dgxForm, DGX_EMPTY, {
+      name: tpl.name || 'DGX-Spark-01',
+      ip: tpl.ip || '',
+      os_type: tpl.os_type || 'linux',
+      diag_user: tpl.diag_user || 'nvidia',
+      diag_port: tpl.diag_port || 22,
+      diag_password: '',
+    })
+    dgxHint.value = tpl.hint || ''
+  } catch (e) {
+    dgxHint.value = '获取 DGX 模板失败, 已载入默认模板。'
+  }
+  dgxVisible.value = true
+}
+
+async function registerDgx() {
+  if (!dgxForm.ip || !dgxForm.name) {
+    ElMessage.warning('请填写名称和 IP 地址')
+    return
+  }
+  submittingDgx.value = true
+  try {
+    const payload = { ...dgxForm }
+    // 若已存在同 IP 的服务器(纳管上报自动建的那条), 则更新避免重复
+    const existing = (await serverApi.list({ keyword: dgxForm.ip })) || []
+    const match = existing.find((s) => s.ip === dgxForm.ip)
+    if (match) {
+      const upd = { ...payload }
+      if (!upd.diag_password) delete upd.diag_password
+      await serverApi.update(match.id, upd)
+      ElMessage.success(`DGX 已更新登记: ${match.name}`)
+    } else {
+      await serverApi.create(payload)
+      ElMessage.success('DGX 登记成功')
+    }
+    dgxVisible.value = false
+    load()
+  } catch (e) {
+    const detail = e?.response?.data?.detail || e?.message || '登记失败'
+    ElMessage.error('登记失败: ' + detail)
+  } finally {
+    submittingDgx.value = false
+  }
 }
 
 onMounted(applyQuery)

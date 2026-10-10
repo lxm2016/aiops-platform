@@ -206,9 +206,18 @@ async def health():
 
     info["asyncio_tasks"] = len(asyncio.all_tasks())
 
-    # 数据库连通性: 这是"进程活着但接口全挂"最关键的检测点
+    # 数据库连通性: 探活失败时【降级】而非【判死】。
+    # 关键修复(2026-10): 不再返回 503。一次 SQLite 抖动/瞬时锁等待就返回 503,
+    # 会让前端判定后端"已断开"疯狂刷屏(正是"每隔几秒提示超时重连"的根因之一);
+    # 更糟的是若 systemd watchdog 用 /api/health 判断存活, 会据此不断重启进程,
+    # 形成"重启循环"。现在: 进程活着一律 200, 是否健康用 status(ok/degraded) 表达;
+    #       真正的"进程已死/端口无人监听"由 /api/health/live (不查库) 体现。
     t0 = time.monotonic()
-    info["database"] = "ok" if await ping_db() else "error"
+    try:
+        db_ok = await asyncio.wait_for(ping_db(), timeout=2.0)
+    except Exception:
+        db_ok = False
+    info["database"] = "ok" if db_ok else "degraded"
     info["db_latency_ms"] = round((time.monotonic() - t0) * 1000, 1)
 
     # 定时任务状态 (含自检采集到的 fd/内存)
@@ -217,15 +226,17 @@ async def health():
 
     if info["database"] != "ok":
         info["status"] = "degraded"
+        info["warning"] = "数据库探活超时/失败(已降级, 进程仍存活)"
 
-    # fd 逼近上限也视为不健康, 让 watchdog 提前介入
+    # fd 逼近上限也视为不健康, 但同样只降级、不判死
     fds, limit = info.get("fds"), info.get("fd_limit")
     if fds and limit and fds > limit * 0.9:
         info["status"] = "degraded"
-        info["warning"] = f"文件描述符使用率过高: {fds}/{limit}"
+        if not info.get("warning"):
+            info["warning"] = f"文件描述符使用率过高: {fds}/{limit}"
 
-    status_code = 200 if info["status"] == "ok" else 503
-    return JSONResponse(status_code=status_code, content=info)
+    # 关键: 始终 200。是否"健康"由 status 字段表达; watchdog 判活请改用 /api/health/live。
+    return JSONResponse(status_code=200, content=info)
 
 
 @app.get("/api/health/live")

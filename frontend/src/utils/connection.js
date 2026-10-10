@@ -17,6 +17,8 @@ import axios from 'axios'
 const HEARTBEAT_INTERVAL = 30000   // 正常时 30 秒探活一次
 const RETRY_INTERVAL = 5000        // 异常时 5 秒重试一次
 const PROBE_TIMEOUT = 8000
+// 连续探测失败达到该次数才判定"后端已断开": 避免单次瞬断/瞬超时造成反复横跳
+const MAX_CONSECUTIVE_FAILURES = 2
 
 export const connState = reactive({
   online: true,          // 后端是否可达且健康
@@ -33,6 +35,9 @@ const probe = axios.create({ baseURL: '/api', timeout: PROBE_TIMEOUT })
 let timer = null
 let started = false
 let everDown = false
+let consecutiveFails = 0
+// 每个"离线 episode"只提示一次, 避免后端抖动时每 5s 弹一次重连 Toast 刷屏
+let offlineToastShown = false
 
 async function checkNow() {
   if (connState.checking) return connState.online
@@ -46,6 +51,8 @@ async function checkNow() {
 
     if (!reachable) throw new Error(`服务返回 ${res.status}`)
 
+    // 探测成功: 复位连续失败计数
+    consecutiveFails = 0
     const wasOffline = !connState.online
     connState.online = true
     connState.degraded = !!unhealthy
@@ -53,18 +60,23 @@ async function checkNow() {
     connState.lastMessage = body.warning || ''
     if (wasOffline) {
       connState.downSince = null
+      offlineToastShown = false   // 恢复后重置, 下次离线再允许提示一次
       // 广播: 服务已恢复, 页面应重新拉取数据
       window.dispatchEvent(new CustomEvent('aiops:backend-restored'))
     }
     return true
   } catch (e) {
-    connState.failures += 1
-    if (connState.online || connState.downSince === null) {
-      connState.downSince = Date.now()
+    // 业务请求失败 / 探测超时才走到这里; 单次失败不足以判定离线, 需连续阈值
+    consecutiveFails += 1
+    connState.failures = consecutiveFails
+    if (consecutiveFails >= MAX_CONSECUTIVE_FAILURES) {
+      if (connState.online || connState.downSince === null) {
+        connState.downSince = Date.now()
+      }
+      connState.online = false
+      connState.degraded = false
+      connState.lastMessage = e?.message || '无法连接服务器'
     }
-    connState.online = false
-    connState.degraded = false
-    connState.lastMessage = e?.message || '无法连接服务器'
     everDown = true
     return false
   } finally {
@@ -83,7 +95,12 @@ function schedule() {
 
 /** 业务请求判定为"后端不可用"时调用, 立即进入异常态并加快探测频率 */
 export function markBackendDown(reason) {
-  if (connState.online) connState.downSince = Date.now()
+  // 真正的业务请求失败(如 5xx/超时)是强信号, 立即判定离线,
+  // 但每个离线 episode 只提示一次(见 consumeDownToast)。
+  if (connState.online) {
+    connState.downSince = Date.now()
+    offlineToastShown = false   // 新的一次离线, 允许再提示一次
+  }
   connState.online = false
   connState.failures += 1
   if (reason) connState.lastMessage = reason
@@ -114,6 +131,13 @@ export function startConnectionMonitor() {
 
 export function hasEverBeenDown() {
   return everDown
+}
+
+/** 每个离线 episode 只返回一次 true: 用于让重连 Toast 不刷屏。 */
+export function consumeDownToast() {
+  if (offlineToastShown) return false
+  offlineToastShown = true
+  return true
 }
 
 export function downDurationText() {

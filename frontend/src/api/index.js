@@ -1,7 +1,7 @@
 import axios from 'axios'
 import { ElMessage } from 'element-plus'
 import router from '@/router'
-import { markBackendDown, connState } from '@/utils/connection'
+import { markBackendDown, connState, consumeDownToast } from '@/utils/connection'
 
 const http = axios.create({
   baseURL: '/api',
@@ -91,8 +91,8 @@ http.interceptors.response.use(
     // 重试耗尽: 判定后端不可用, 交给连接监视器去持续探测/自动恢复
     if (isRetryable(err)) {
       markBackendDown(err.code === 'ECONNABORTED' ? '请求超时' : '无法连接服务器')
-      // 连接类错误由顶部横幅统一提示, 避免每个接口都弹一次
-      if (!connState.online && !config.silent) {
+      // 连接类错误由顶部横幅统一提示; 同一离线 episode 只弹一次, 避免刷屏
+      if (!connState.online && !config.silent && consumeDownToast()) {
         ElMessage.error('服务器响应超时，正在自动重连…')
       }
     } else if (!config.silent) {
@@ -147,6 +147,8 @@ export const serverApi = {
   // 点击"进程数"卡片下钻: 只读列出资源占用 TOP 进程
   processList: (id) => http.get(`/servers/${id}/process-list`, { timeout: 60000 }),
   summary: () => http.get('/servers/stats/summary'),
+  // 一键登记 DGX 引导模板(尽量自动带出 DGX 的 IP 与 SSH 凭据)
+  dgxTemplate: () => http.get('/servers/dgx-template', { silent: true }),
   // 暂停/恢复监测 (enabled=False: 不采集/不告警/不标离线, Agent 上报被忽略)
   setEnabled: (id, enabled) => http.patch(`/servers/${id}/enabled`, { enabled }),
   // 批量暂停/恢复监测多台服务器(配合列表复选框)
