@@ -13,6 +13,23 @@ import sys
 
 from .base import BaseCollector
 
+# Windows 上隐藏子进程(sc / wmic / powershell)的控制台窗口。
+# 否则每次采集循环都会闪出这些控制台窗口(每 5 秒一次), 还会抢走用户
+# 在服务器上的输入焦点(表现为"什么都输入不了")。
+# 非 Windows 平台不设置这些值(避免属性不存在报错)。
+_RUN_KWARGS = {}
+if sys.platform == "win32":
+    try:
+        _si = subprocess.STARTUPINFO()
+        _si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        _si.wShowWindow = 0  # SW_HIDE
+        _RUN_KWARGS["startupinfo"] = _si
+        # CREATE_NO_WINDOW 从 Python 3.7 起在 Windows 上可用, 兜底为 0
+        _RUN_KWARGS["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    except Exception:
+        # 极端情况下(如旧 Python)拿不到 STARTUPINFO, 仅用 CREATE_NO_WINDOW
+        _RUN_KWARGS["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
 # Windows 内部版本号 -> 产品名映射
 _WIN_NAMES = {
     (6, 0): "Windows Server 2008",
@@ -31,10 +48,14 @@ _WIN10_BUILDS = [
 
 
 def _run_cmd(cmd, timeout=30):
-    """执行命令并按系统编码解码输出, 失败返回空字符串。"""
+    """执行命令并按系统编码解码输出, 失败返回空字符串。
+
+    在 Windows 上通过 _RUN_KWARGS 隐藏子进程的控制台窗口,
+    避免采集循环每 5 秒闪窗并抢走用户焦点。
+    """
     try:
         raw = subprocess.check_output(
-            cmd, stderr=subprocess.DEVNULL, timeout=timeout,
+            cmd, stderr=subprocess.DEVNULL, timeout=timeout, **_RUN_KWARGS,
         )
         encoding = locale.getpreferredencoding(False) or "utf-8"
         return raw.decode(encoding, errors="replace")
