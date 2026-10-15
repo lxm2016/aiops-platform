@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Header
-from sqlalchemy import select, func
+from sqlalchemy import delete as sa_delete, select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -170,9 +170,22 @@ async def delete_server(server_id: int, db: AsyncSession = Depends(get_db)):
     server = await db.get(Server, server_id)
     if not server:
         raise HTTPException(status_code=404, detail="服务器不存在")
-    await db.delete(server)
-    await db.commit()
-    invalidate_ip_cache()
+    # 历史指标(server_metrics)是分钟级采集的大表, 不能靠 ORM 级联删
+    # (会把整表加载成对象再逐行 DELETE, 跑了几个月的服务器必然超时)。
+    # 这里用单条 SQL 按 server_id 索引批量删; 配合模型上的 passive_deletes,
+    # 删服务器本体时也不再对 server_metrics 做全列 SELECT —— 即使存量老库
+    # 缺新列也能删干净(列表页只查 servers 主表, 所以之前"列表正常但删不掉")。
+    try:
+        await db.execute(
+            sa_delete(ServerMetric).where(ServerMetric.server_id == server_id)
+        )
+        await db.delete(server)
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        logger.error(f"[服务器] 删除 id={server_id} 失败: {e}")
+        raise HTTPException(status_code=500, detail=f"删除失败: {e}")
+    invalidate_ip_cache()          # 告警文案按名字反查 IP 的缓存要失效
     return {"ok": True}
 
 

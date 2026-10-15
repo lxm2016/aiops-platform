@@ -34,7 +34,14 @@ class Server(Base):
     diag_port = Column(Integer, default=22)         # Linux SSH=22 / Windows WinRM=5985
     created_at = Column(DateTime, default=datetime.utcnow)
 
-    metrics = relationship("ServerMetric", back_populates="server", cascade="all, delete-orphan")
+    # passive_deletes: 删除服务器时不要把 server_metrics 整表加载成 ORM 对象
+    # 再逐行删(老服务器几十万行指标必然超时), 也不要在删除时对该表做全列
+    # SELECT —— 存量老库若缺新列, 会让删除直接 500(前端表现为"删除不掉")。
+    # 级联清理由 delete_server 接口用 SQL 批量删除完成。
+    metrics = relationship(
+        "ServerMetric", back_populates="server",
+        cascade="all, delete-orphan", passive_deletes=True,
+    )
 
 
 class ServerMetric(Base):
