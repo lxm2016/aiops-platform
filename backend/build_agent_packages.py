@@ -243,7 +243,7 @@ if not exist "%PY%" (
 for %%I in ("%PY%") do echo [OK] Python 运行时: %%~fI
 
 if exist "%~dp0config.yaml" (
-  echo [1/4] 已存在 config.yaml, 保留现有配置(含SMB共享/凭据)...
+  echo [1/4] 已存在 config.yaml, 保留现有配置, 含SMB共享与凭据...
 ) else (
   echo [1/4] 写入配置...
   (
@@ -254,9 +254,9 @@ if exist "%~dp0config.yaml" (
   echo   interval: !INTERVAL!
   echo   timeout: 10
   echo nas_shares:
-  echo   # 网络共享盘监控(华为存储等SMB共享盘): 在下方加 "- UNC路径"(格式见仓库 agent/config.yaml 注释)
+  echo   # 网络共享盘监控: 在下方 nas_shares 下加一行 "- UNC路径", 详见 agent/config.yaml 注释
   echo nas_creds:
-  echo   # 共享访问凭据(可选, SYSTEM身份访问UNC共享失败时使用): 为共享主机配 user/password
+  echo   # 共享访问凭据可选: 仅当 SYSTEM 身份访问UNC共享失败时使用, 为共享主机配 user/password
   ) > "%~dp0config.yaml"
 )
 
