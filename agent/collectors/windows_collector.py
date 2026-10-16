@@ -27,9 +27,9 @@ if sys.platform == "win32":
         _RUN_KWARGS["startupinfo"] = _si
         # CREATE_NO_WINDOW 从 Python 3.7 起在 Windows 上可用, 兜底为 0
         _RUN_KWARGS["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        except Exception:
-            # 极端情况下(如旧 Python)拿不到 STARTUPINFO, 仅用 CREATE_NO_WINDOW
-            _RUN_KWARGS["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    except Exception:
+        # 极端情况下(如旧 Python)拿不到 STARTUPINFO, 仅用 CREATE_NO_WINDOW
+        _RUN_KWARGS["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 # WNetAddConnection2W 连接 SMB 共享时用的结构(服务身份下访问共享需带凭据)
 class NETRESOURCEW(ctypes.Structure):
