@@ -254,9 +254,9 @@ if exist "%~dp0config.yaml" (
   echo   interval: !INTERVAL!
   echo   timeout: 10
   echo nas_shares:
-  echo   # 网络共享盘监控: 在下方 nas_shares 下加一行 "- UNC路径", 详见 agent/config.yaml 注释
+  echo   # add lines like "- \\\\192.168.1.5\\share" below to monitor SMB/NAS shares
   echo nas_creds:
-  echo   # 共享访问凭据可选: 仅当 SYSTEM 身份访问UNC共享失败时使用, 为共享主机配 user/password
+  echo   # optional, only if agent runs as SYSTEM and UNC access denied: host: user/password
   ) > "%~dp0config.yaml"
 )
 

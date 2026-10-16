@@ -149,8 +149,20 @@ def load_config(path):
         "nas_creds": {},
     }
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            text = f.read()
+        with open(path, "rb") as f:
+            raw = f.read()
+        # 编码兜底: install.bat 用 echo 写出的 config 是控制台编码(中文系统为
+        # GBK), 用户用记事本另存为 ANSI 也是 GBK; 依次尝试 utf-8-sig/utf-8/gbk。
+        text = None
+        for enc in ("utf-8-sig", "utf-8", "gbk"):
+            try:
+                text = raw.decode(enc)
+                break
+            except (UnicodeDecodeError, LookupError):
+                continue
+        if text is None:
+            logging.error("配置文件 %s 不是有效的 UTF-8/GBK 文本, 使用默认配置", path)
+            return cfg
         user_cfg = yaml.safe_load(text) if yaml else _simple_yaml_load(text)
         user_cfg = user_cfg or {}
         for section, values in user_cfg.items():
