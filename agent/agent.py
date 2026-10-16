@@ -21,6 +21,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import signal
 import threading
 import time
@@ -49,9 +50,13 @@ def _simple_yaml_load(text):
 
     支持本项目的 config.yaml 结构:
       - 顶层 key: value (标量)
-      - 顶层 key: (空) 下跟缩进字典段(server:/agent:/nas_creds:)
-      - 顶层 key: (空) 下跟缩进块列表段(nas_shares: -> "- 项")
+      - 顶层 key: (空) 下跟字典段(server:/agent:/nas_creds:)
+      - 顶层 key: (空) 下跟块列表段(nas_shares: -> "- 项", 缩进或顶格均可)
       - 嵌套字典(nas_creds 下再按主机分 user/password)
+    容错(用户手写常见失误):
+      - "- 项" 顶格写在段名下(标准 YAML 也允许)同样识别;
+      - 注释仅按"井号前是行首或空白"剥离(密码里可含 # 不被截断);
+      - 值两端的中文全角引号(“”)按引号剥掉(防中文输入法误输)。
     仅用于本项目, 非通用 YAML 解析器。
     """
     result = {}
@@ -59,6 +64,7 @@ def _simple_yaml_load(text):
     stack = [(-1, result)]
     # 与栈平行: 每个容器在父容器中的"键名"(列表提升时用于回写父 dict)
     keys = [None]
+    last_key = None  # 最近一个顶层段名: 用于容错"顶格写列表项"
 
     def _coerce(v):
         # 尝试转数字
@@ -70,8 +76,13 @@ def _simple_yaml_load(text):
             except ValueError:
                 return v
 
+    def _strip_quotes(v):
+        # 去两端空白与引号(含中文输入法的全角引号)
+        return v.strip().strip("\"'“”‘’")
+
     for raw in text.splitlines():
-        line = raw.split("#", 1)[0].rstrip()
+        # 仅当 # 前是行首或空白时才视为注释(避免截断含 # 的密码/路径)
+        line = re.sub(r"(^|\s)#.*$", "", raw).rstrip()
         if not line.strip():
             continue
         indent = len(line) - len(line.lstrip(" "))
@@ -84,24 +95,37 @@ def _simple_yaml_load(text):
         _, parent = stack[-1]
 
         if content.startswith("- "):
-            item = content[2:].strip().strip('"').strip("'")
+            item = _strip_quotes(content[2:])
             if not isinstance(parent, list):
-                # 当前占位空 dict 提升为列表, 并回写到父 dict 对应键
+                # 常规路径: 把当前占位空 dict 提升为列表并回写父 dict 对应键
                 gp = stack[-2][1] if len(stack) >= 2 else result
-                key = keys[-1]
-                if isinstance(gp, dict) and key is not None:
+                k = keys[-1]
+                if isinstance(gp, dict) and k is not None:
                     new_list = []
-                    gp[key] = new_list
+                    gp[k] = new_list
                     stack[-1] = (stack[-1][0], new_list)
                     parent = new_list
+                elif last_key is not None and isinstance(result.get(last_key), (dict, list)):
+                    # 容错: "- 项" 顶格写在段名下未缩进
+                    cur = result[last_key]
+                    if isinstance(cur, list):
+                        parent = cur
+                    elif isinstance(cur, dict) and not cur:
+                        cur = []
+                        result[last_key] = cur
+                        parent = cur
+                    else:
+                        parent = []
                 else:
                     parent = []
-            parent.append(_coerce(item))
+            if isinstance(parent, list):
+                parent.append(_coerce(item))
         else:
             key, _, value = content.partition(":")
             key = key.strip()
-            value = value.strip().strip('"').strip("'")
+            value = _strip_quotes(value)
             if indent == 0:
+                last_key = key
                 if value == "":
                     result[key] = {}
                     stack.append((0, result[key]))
