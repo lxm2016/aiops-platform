@@ -83,8 +83,13 @@ fi
 echo "[OK] Python 运行时: $PY ($("$PY" --version 2>&1))"
 
 # ---------- 写配置 ----------
-echo "[3/5] 写入配置..."
-cat > "$INSTALL_DIR/config.yaml" << EOF
+# 已有 config.yaml(之前装过 / 已配置过 SMB 共享与凭据)则保留, 避免覆盖用户配置;
+# 仅在不存在时写入全新配置(用于首次安装)。
+if [ -f "$INSTALL_DIR/config.yaml" ]; then
+  echo "[3/5] 已存在 config.yaml, 保留现有配置(含 SMB 共享/凭据)..."
+else
+  echo "[3/5] 写入配置..."
+  cat > "$INSTALL_DIR/config.yaml" << EOF
 server:
   url: "$SERVER/api/servers/report"
   token: "$TOKEN"
@@ -92,8 +97,11 @@ agent:
   interval: $INTERVAL
   timeout: 10
 nas_shares:
-  # 网络共享盘监控(华为存储等SMB共享盘): 在下方加 "- UNC路径" 行(格式见 agent/config.yaml 注释)
+  # 网络共享盘监控(华为存储等SMB共享盘): 在下方加 "- UNC路径" 行(格式见仓库 agent/config.yaml 注释)
+nas_creds:
+  # 共享访问凭据(可选, SYSTEM身份访问UNC共享失败时使用): 为共享主机配 user/password
 EOF
+fi
 
 # ---------- 注册开机自启并启动 ----------
 echo "[4/5] 注册开机自启并启动..."

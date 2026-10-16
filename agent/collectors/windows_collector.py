@@ -27,9 +27,23 @@ if sys.platform == "win32":
         _RUN_KWARGS["startupinfo"] = _si
         # CREATE_NO_WINDOW 从 Python 3.7 起在 Windows 上可用, 兜底为 0
         _RUN_KWARGS["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    except Exception:
-        # 极端情况下(如旧 Python)拿不到 STARTUPINFO, 仅用 CREATE_NO_WINDOW
-        _RUN_KWARGS["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        except Exception:
+            # 极端情况下(如旧 Python)拿不到 STARTUPINFO, 仅用 CREATE_NO_WINDOW
+            _RUN_KWARGS["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+# WNetAddConnection2W 连接 SMB 共享时用的结构(服务身份下访问共享需带凭据)
+class NETRESOURCEW(ctypes.Structure):
+    _fields_ = [
+        ("dwScope", ctypes.c_ulong),
+        ("dwType", ctypes.c_ulong),
+        ("dwDisplayType", ctypes.c_ulong),
+        ("dwUsage", ctypes.c_ulong),
+        ("lpLocalName", ctypes.c_wchar_p),
+        ("lpRemoteName", ctypes.c_wchar_p),
+        ("lpComment", ctypes.c_wchar_p),
+        ("lpProvider", ctypes.c_wchar_p),
+    ]
+
 
 # Windows 内部版本号 -> 产品名映射
 _WIN_NAMES = {
@@ -182,11 +196,46 @@ class WindowsCollector(BaseCollector):
     # 做法: 用 GetDiskFreeSpaceExW 直接按 UNC 路径或盘符查询空间, 不依赖盘符在
     # (服务身份下)是否可见, 比枚举映射盘更稳。要监控哪些共享由 agent 配置
     # 的 nas_shares 列表指定(见 agent.py / config.yaml)。
+    #
+    # 凭据(SYSTEM 关键): Agent 常以 Windows 服务(本地系统账户)运行, 直接查 UNC
+    # 共享往往因无凭据而失败。可在 nas_creds 里为共享所属主机配上
+    # user/password, Agent 会用 WNetAddConnection2W 先带凭据建连再查空间。
     # ------------------------------------------------------------------
-    def _query_unc_space(self, path):
+    def _ensure_nas_credentialed(self, remote_unc, creds):
+        """用 WNetAddConnection2W 以指定凭据建立到 UNC 共享的连接。
+
+        返回 True 表示连接可用(已连或本就可用), False 表示建连失败。
+        仅在 Windows 且配置了凭据时生效; 非 Windows 或无需凭据时直接返回 True。
+        """
+        if sys.platform != "win32" or not creds:
+            return True
+        try:
+            mpr = ctypes.windll.mpr
+        except Exception:
+            return True
+        user, password = creds
+        nr = NETRESOURCEW()
+        nr.dwType = 1  # RESOURCETYPE_DISK
+        nr.lpLocalName = None
+        nr.lpRemoteName = ctypes.c_wchar_p(remote_unc)
+        nr.lpProvider = None
+        # CONNECT_TEMPORARY(0x4): 进程退出自动断开, 不留僵尸连接
+        rc = mpr.WNetAddConnection2W(
+            ctypes.byref(nr),
+            ctypes.c_wchar_p(password) if password else None,
+            ctypes.c_wchar_p(user) if user else None,
+            0x4,
+        )
+        # 0=成功; 1219/1208/85/1223 视为"已连/已有连接/用户取消", 当作可用
+        if rc in (0, 1219, 1208, 85, 1223):
+            return True
+        return False
+
+    def _query_unc_space(self, path, creds=None):
         """用 GetDiskFreeSpaceExW 查询任意路径(UNC 或盘符)的磁盘空间。
 
         返回 {total, free, used}(字节) 或 None(失败, 如路径不可达/无权限)。
+        若提供凭据且为 UNC 路径, 会先尝试带凭据建连(服务身份下访问共享常需)。
         """
         if sys.platform != "win32":
             return None
@@ -194,6 +243,9 @@ class WindowsCollector(BaseCollector):
             k32 = ctypes.windll.kernel32
         except Exception:
             return None
+        # 服务身份 + UNC 共享: 先带凭据建连, 否则大概率访问被拒
+        if creds and (path or "").startswith("\\\\"):
+            self._ensure_nas_credentialed(path, creds)
         free = ctypes.c_ulonglong(0)
         total = ctypes.c_ulonglong(0)
         avail = ctypes.c_ulonglong(0)
@@ -225,6 +277,7 @@ class WindowsCollector(BaseCollector):
         失败项 {path, label, ok:false, error}。
         """
         shares = getattr(self, "nas_shares", None) or []
+        creds_map = getattr(self, "nas_creds", None) or {}
         out = []
         for entry in shares:
             # 兼容 dict 写法({path, label})与字符串写法("路径" / "路径 | 标签")
@@ -240,8 +293,19 @@ class WindowsCollector(BaseCollector):
                     raw_path, label = s, ""
             if not raw_path:
                 continue
+            # 从 UNC 解析主机(\\host\share -> host), 查对应凭据
+            creds = None
+            if raw_path.startswith("\\\\"):
+                host = raw_path[2:].split("\\", 1)[0]
+                if host and host in creds_map:
+                    pair = creds_map[host]
+                    if isinstance(pair, dict):
+                        creds = (str(pair.get("user", "")), str(pair.get("password", "")))
+                    elif isinstance(pair, str) and ":" in pair:
+                        u, _, p = pair.partition(":")
+                        creds = (u, p)
             rec = {"path": raw_path, "label": label, "ok": False}
-            info = self._query_unc_space(raw_path)
+            info = self._query_unc_space(raw_path, creds)
             if info:
                 rec["ok"] = True
                 rec["total_gb"] = round(info["total"] / GB, 2)
@@ -249,7 +313,7 @@ class WindowsCollector(BaseCollector):
                 rec["free_gb"] = round(info["free"] / GB, 2)
                 rec["percent"] = round(info["used"] * 100.0 / info["total"], 1) if info["total"] else 0.0
             else:
-                rec["error"] = "无法访问(服务身份可能无权限, 或路径不可达)"
+                rec["error"] = "无法访问(服务身份/凭据不正确, 或路径不可达)"
             out.append(rec)
         return out
 

@@ -119,8 +119,13 @@ fi
 echo "[OK] Python 运行时: $PY ($("$PY" --version 2>&1))"
 
 # ---------- 写配置 ----------
-echo "[3/5] 写入配置..."
-cat > "$INSTALL_DIR/config.yaml" << EOF
+# 已有 config.yaml(之前装过 / 已配置过 SMB 共享与凭据)则保留, 避免覆盖用户配置;
+# 仅在不存在时写入全新配置(用于首次安装)。
+if [ -f "$INSTALL_DIR/config.yaml" ]; then
+  echo "[3/5] 已存在 config.yaml, 保留现有配置(含 SMB 共享/凭据)..."
+else
+  echo "[3/5] 写入配置..."
+  cat > "$INSTALL_DIR/config.yaml" << EOF
 server:
   url: "$SERVER/api/servers/report"
   token: "$TOKEN"
@@ -128,8 +133,11 @@ agent:
   interval: $INTERVAL
   timeout: 10
 nas_shares:
-  # 网络共享盘监控(华为存储等SMB共享盘): 在下方加 "- UNC路径" 行(格式见 agent/config.yaml 注释)
+  # 网络共享盘监控(华为存储等SMB共享盘): 在下方加 "- UNC路径" 行(格式见仓库 agent/config.yaml 注释)
+nas_creds:
+  # 共享访问凭据(可选, SYSTEM身份访问UNC共享失败时使用): 为共享主机配 user/password
 EOF
+fi
 
 # ---------- 注册开机自启并启动 ----------
 echo "[4/5] 注册开机自启并启动..."
@@ -234,17 +242,23 @@ if not exist "%PY%" (
 
 for %%I in ("%PY%") do echo [OK] Python 运行时: %%~fI
 
-echo [1/4] 写入配置...
-(
-echo server:
-echo   url: "!SERVER!/api/servers/report"
-echo   token: "!TOKEN!"
-echo agent:
-echo   interval: !INTERVAL!
-echo   timeout: 10
-echo nas_shares:
-echo   # 网络共享盘监控(华为存储等SMB共享盘): 在下方加 "- UNC路径"(格式见 agent/config.yaml 注释)
-) > "%~dp0config.yaml"
+if exist "%~dp0config.yaml" (
+  echo [1/4] 已存在 config.yaml, 保留现有配置(含SMB共享/凭据)...
+) else (
+  echo [1/4] 写入配置...
+  (
+  echo server:
+  echo   url: "!SERVER!/api/servers/report"
+  echo   token: "!TOKEN!"
+  echo agent:
+  echo   interval: !INTERVAL!
+  echo   timeout: 10
+  echo nas_shares:
+  echo   # 网络共享盘监控(华为存储等SMB共享盘): 在下方加 "- UNC路径"(格式见仓库 agent/config.yaml 注释)
+  echo nas_creds:
+  echo   # 共享访问凭据(可选, SYSTEM身份访问UNC共享失败时使用): 为共享主机配 user/password
+  ) > "%~dp0config.yaml"
+)
 
 echo [2/4] 测试采集并上报一次...
 "%PY%" agent.py --once
@@ -326,7 +340,8 @@ def _copy_psutil_linux(out: tarfile.TarFile):
 
 
 def _copy_agent_files_linux(out: tarfile.TarFile):
-    for name in ["agent.py", "config.yaml"]:
+    # 注意: 不打包 config.yaml —— 安装脚本会在首次安装时生成, 重装时保留已有配置
+    for name in ["agent.py"]:
         p = AGENT_SRC / name
         if p.exists():
             out.add(p, arcname=f"aiops-agent/{name}")
@@ -355,8 +370,8 @@ def build_windows():
     print("[Windows] 构建 aiops-agent-windows.zip (内置便携Python+psutil) ...")
     zip_path = OUT_DIR / "aiops-agent-windows.zip"
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        # Agent 代码
-        for name in ["agent.py", "config.yaml"]:
+        # Agent 代码(不打包 config.yaml: 首次安装由 install.bat 生成, 重装保留)
+        for name in ["agent.py"]:
             p = AGENT_SRC / name
             if p.exists():
                 zf.write(p, arcname=f"aiops-agent/{name}")

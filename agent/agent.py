@@ -45,20 +45,20 @@ def _handle_signal(signum, frame):
 
 
 def _simple_yaml_load(text):
-    """极简YAML解析器(仅支持本项目config.yaml的两层结构 + 块列表)。
+    """极简 YAML 解析器(无 PyYAML 的目标机使用)。
 
-    支持:
+    支持本项目的 config.yaml 结构:
       - 顶层 key: value (标量)
-      - 顶层 key: (空值) 下跟缩进的 key: value 字典段(如 server:/agent:)
-      - 顶层 key: (空值) 下跟缩进的 "- 项" 块列表段(如 nas_shares:)
-        列表项可以是纯路径字符串, 也可 "路径 | 标签" 形式带备注。
-
-    在目标机器没有安装 PyYAML 时使用, 避免额外依赖。
+      - 顶层 key: (空) 下跟缩进字典段(server:/agent:/nas_creds:)
+      - 顶层 key: (空) 下跟缩进块列表段(nas_shares: -> "- 项")
+      - 嵌套字典(nas_creds 下再按主机分 user/password)
+    仅用于本项目, 非通用 YAML 解析器。
     """
     result = {}
-    current = None            # 当前字典容器
-    current_list_key = None   # 若当前段是列表, 记录顶层键名
-    current_list = None
+    # 栈:(缩进, 容器); 容器为 dict 或 list, 栈底为 result(缩进 -1)
+    stack = [(-1, result)]
+    # 与栈平行: 每个容器在父容器中的"键名"(列表提升时用于回写父 dict)
+    keys = [None]
 
     def _coerce(v):
         # 尝试转数字
@@ -76,36 +76,47 @@ def _simple_yaml_load(text):
             continue
         indent = len(line) - len(line.lstrip(" "))
         content = line.strip()
-        if indent == 0:
+
+        # 回退到缩进严格小于当前行的最近祖先
+        while len(stack) > 1 and stack[-1][0] >= indent:
+            stack.pop()
+            keys.pop()
+        _, parent = stack[-1]
+
+        if content.startswith("- "):
+            item = content[2:].strip().strip('"').strip("'")
+            if not isinstance(parent, list):
+                # 当前占位空 dict 提升为列表, 并回写到父 dict 对应键
+                gp = stack[-2][1] if len(stack) >= 2 else result
+                key = keys[-1]
+                if isinstance(gp, dict) and key is not None:
+                    new_list = []
+                    gp[key] = new_list
+                    stack[-1] = (stack[-1][0], new_list)
+                    parent = new_list
+                else:
+                    parent = []
+            parent.append(_coerce(item))
+        else:
             key, _, value = content.partition(":")
             key = key.strip()
             value = value.strip().strip('"').strip("'")
-            current = None
-            current_list = None
-            current_list_key = None
-            if value == "":
-                # 可能是字典段(server/agent)或列表段(nas_shares),
-                # 等子项出现时再决定(列表段首行是 "- ")
-                current = result[key] = {}
-                current_list_key = key
+            if indent == 0:
+                if value == "":
+                    result[key] = {}
+                    stack.append((0, result[key]))
+                    keys.append(key)
+                else:
+                    result[key] = _coerce(value)
             else:
-                result[key] = _coerce(value)
-        else:
-            if content.startswith("- "):
-                item = content[2:].strip().strip('"').strip("'")
-                if current_list is None:
-                    # 把刚才建的空字典段提升为列表段
-                    result[current_list_key] = []
-                    current_list = result[current_list_key]
-                    current = None
-                current_list.append(item)
-            else:
-                if current is None:
+                if not isinstance(parent, dict):
                     continue
-                k2, _, v2 = content.partition(":")
-                k2 = k2.strip()
-                v2 = v2.strip().strip('"').strip("'")
-                current[k2] = _coerce(v2)
+                if value == "":
+                    parent[key] = {}
+                    stack.append((indent, parent[key]))
+                    keys.append(key)
+                else:
+                    parent[key] = _coerce(value)
     return result
 
 
@@ -127,6 +138,15 @@ def load_config(path):
         #   - \\192.168.1.5\share
         #   - \\192.168.1.6\share | 华为存储A
         "nas_shares": [],
+        # 共享盘访问凭据(可选): Agent 常以 SYSTEM 身份运行, 直接查 UNC 共享
+        # 常因无凭据失败。在此为共享所属主机配上 user/password, Agent 会用
+        # WNetAddConnection2W 带凭据建连后再查空间。host 与 nas_shares 里
+        # UNC 的 \\host 部分保持一致。示例(取消注释并改成你的实际信息即可):
+        # nas_creds:
+        #   192.168.1.5:
+        #     user: "storage\\admin"
+        #     password: "你的密码"
+        "nas_creds": {},
     }
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -211,6 +231,9 @@ def main():
     # 空段可能被解析为 dict, 这里统一保证为 list
     _ns = cfg.get("nas_shares")
     collector.nas_shares = _ns if isinstance(_ns, list) else []
+    # 共享盘访问凭据(可选, SYSTEM 身份访问 UNC 共享失败时使用)
+    _nc = cfg.get("nas_creds")
+    collector.nas_creds = _nc if isinstance(_nc, dict) else {}
     logging.info(
         "Agent 启动 | 平台=%s | 上报地址=%s | 间隔=%ss",
         collector.os_type, url, interval,
