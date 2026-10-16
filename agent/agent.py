@@ -45,35 +45,67 @@ def _handle_signal(signum, frame):
 
 
 def _simple_yaml_load(text):
-    """极简YAML解析器(仅支持本项目config.yaml的两层 key: value 结构)。
-    在目标机器没有安装 PyYAML 时使用, 避免额外依赖。"""
+    """极简YAML解析器(仅支持本项目config.yaml的两层结构 + 块列表)。
+
+    支持:
+      - 顶层 key: value (标量)
+      - 顶层 key: (空值) 下跟缩进的 key: value 字典段(如 server:/agent:)
+      - 顶层 key: (空值) 下跟缩进的 "- 项" 块列表段(如 nas_shares:)
+        列表项可以是纯路径字符串, 也可 "路径 | 标签" 形式带备注。
+
+    在目标机器没有安装 PyYAML 时使用, 避免额外依赖。
+    """
     result = {}
-    current = None
+    current = None            # 当前字典容器
+    current_list_key = None   # 若当前段是列表, 记录顶层键名
+    current_list = None
+
+    def _coerce(v):
+        # 尝试转数字
+        try:
+            return int(v)
+        except ValueError:
+            try:
+                return float(v)
+            except ValueError:
+                return v
+
     for raw in text.splitlines():
-        line = raw.split("#")[0].rstrip()
+        line = raw.split("#", 1)[0].rstrip()
         if not line.strip():
             continue
-        indent = len(line) - len(line.lstrip())
-        key, _, value = line.strip().partition(":")
-        value = value.strip().strip('"').strip("'")
+        indent = len(line) - len(line.lstrip(" "))
+        content = line.strip()
         if indent == 0:
+            key, _, value = content.partition(":")
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            current = None
+            current_list = None
+            current_list_key = None
             if value == "":
-                result[key] = {}
-                current = result[key]
+                # 可能是字典段(server/agent)或列表段(nas_shares),
+                # 等子项出现时再决定(列表段首行是 "- ")
+                current = result[key] = {}
+                current_list_key = key
             else:
-                result[key] = value
-                current = None
+                result[key] = _coerce(value)
         else:
-            if current is not None:
-                # 尝试转数字
-                try:
-                    value = int(value)
-                except ValueError:
-                    try:
-                        value = float(value)
-                    except ValueError:
-                        pass
-                current[key] = value
+            if content.startswith("- "):
+                item = content[2:].strip().strip('"').strip("'")
+                if current_list is None:
+                    # 把刚才建的空字典段提升为列表段
+                    result[current_list_key] = []
+                    current_list = result[current_list_key]
+                    current = None
+                current_list.append(item)
+            else:
+                if current is None:
+                    continue
+                k2, _, v2 = content.partition(":")
+                k2 = k2.strip()
+                v2 = v2.strip().strip('"').strip("'")
+                current[k2] = _coerce(v2)
     return result
 
 
@@ -88,6 +120,13 @@ def load_config(path):
             "interval": 5,    # 采集/上报间隔(秒)
             "timeout": 10,    # HTTP 请求超时(秒)
         },
+        # 要监控的网络共享盘(SMB): 华为存储等映射盘/UNC。每项可写 "UNC路径"
+        # 或 "UNC路径 | 备注名"。为空列表则不采集。服务身份下也能查 UNC,
+        # 比依赖盘符可见性更稳。示例(取消注释并改成你的实际地址即可):
+        # nas_shares:
+        #   - \\192.168.1.5\share
+        #   - \\192.168.1.6\share | 华为存储A
+        "nas_shares": [],
     }
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -168,6 +207,10 @@ def main():
 
     # 根据当前操作系统自动选择采集器
     collector = get_collector()
+    # 共享盘监控列表(华为存储等 SMB 映射盘): 从配置下发到采集器
+    # 空段可能被解析为 dict, 这里统一保证为 list
+    _ns = cfg.get("nas_shares")
+    collector.nas_shares = _ns if isinstance(_ns, list) else []
     logging.info(
         "Agent 启动 | 平台=%s | 上报地址=%s | 间隔=%ss",
         collector.os_type, url, interval,

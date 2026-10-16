@@ -147,6 +147,14 @@ class BaseCollector(ABC):
     def collect_services(self, limit=100):
         """服务列表: [{name, status}]。"""
 
+    def collect_nas_disks(self):
+        """网络共享盘(SMB)空间使用量列表。默认空实现, 由 Windows 采集器覆盖。
+
+        Linux 上 SMB 挂载表现为本地挂载点, 已被 disk_info() 采集,
+        故基类返回空; 仅 Windows 需要单独处理网络映射盘。
+        """
+        return []
+
     # ---------------- 统一采集入口 ----------------
     def collect(self):
         """采集全部指标, 组装为上报 JSON 字典。"""
@@ -175,4 +183,5 @@ class BaseCollector(ABC):
             "disks": disks,
             "ports": self.port_info(),
             "services": self.collect_services(),
+            "nas_disks": self.collect_nas_disks(),
         }

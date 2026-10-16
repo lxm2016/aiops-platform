@@ -115,6 +115,7 @@ class MetricReport(BaseModel):
     load_avg: float = 0.0
     process_count: int = 0
     disks: List[Any] = []
+    nas_disks: List[Any] = []
     ports: List[Any] = []
     services: List[Any] = []
 

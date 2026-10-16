@@ -450,6 +450,7 @@ async def report_metrics(
         process_count=data.process_count,
         raw={
             "disks": data.disks,
+            "nas_disks": data.nas_disks,
             "ports": data.ports,
             "services": data.services,
             "hostname": data.hostname,

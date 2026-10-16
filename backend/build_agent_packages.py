@@ -127,6 +127,8 @@ server:
 agent:
   interval: $INTERVAL
   timeout: 10
+nas_shares:
+  # 网络共享盘监控(华为存储等SMB共享盘): 在下方加 "- UNC路径" 行(格式见 agent/config.yaml 注释)
 EOF
 
 # ---------- 注册开机自启并启动 ----------
@@ -240,6 +242,8 @@ echo   token: "!TOKEN!"
 echo agent:
 echo   interval: !INTERVAL!
 echo   timeout: 10
+echo nas_shares:
+echo   # 网络共享盘监控(华为存储等SMB共享盘): 在下方加 "- UNC路径"(格式见 agent/config.yaml 注释)
 ) > "%~dp0config.yaml"
 
 echo [2/4] 测试采集并上报一次...

@@ -6,12 +6,13 @@
 注意: 建议以管理员权限运行, 否则监听端口-进程映射可能无法获取。
 兼容性说明: Windows 2008/2008R2 请安装 Python 3.8(3.8 是官方支持该系统的最后版本)。
 """
+import ctypes
 import locale
 import re
 import subprocess
 import sys
 
-from .base import BaseCollector
+from .base import BaseCollector, GB
 
 # Windows 上隐藏子进程(sc / wmic / powershell)的控制台窗口。
 # 否则每次采集循环都会闪出这些控制台窗口(每 5 秒一次), 还会抢走用户
@@ -170,3 +171,85 @@ class WindowsCollector(BaseCollector):
             if len(services) >= limit:
                 break
         return services
+
+    # ------------------------------------------------------------------
+    # 网络共享盘(SMB)空间采集
+    #
+    # 华为存储等以 SMB 共享方式挂到 Windows 时, 可能是映射盘(Z:)也可能直接
+    # 用 UNC(\\\\host\\share)访问。psutil.disk_partitions(all=False) 在 Windows
+    # 上只采集本地盘, 网络盘根本不进 disks 列表, 所以这里单独采集。
+    #
+    # 做法: 用 GetDiskFreeSpaceExW 直接按 UNC 路径或盘符查询空间, 不依赖盘符在
+    # (服务身份下)是否可见, 比枚举映射盘更稳。要监控哪些共享由 agent 配置
+    # 的 nas_shares 列表指定(见 agent.py / config.yaml)。
+    # ------------------------------------------------------------------
+    def _query_unc_space(self, path):
+        """用 GetDiskFreeSpaceExW 查询任意路径(UNC 或盘符)的磁盘空间。
+
+        返回 {total, free, used}(字节) 或 None(失败, 如路径不可达/无权限)。
+        """
+        if sys.platform != "win32":
+            return None
+        try:
+            k32 = ctypes.windll.kernel32
+        except Exception:
+            return None
+        free = ctypes.c_ulonglong(0)
+        total = ctypes.c_ulonglong(0)
+        avail = ctypes.c_ulonglong(0)
+        # UNC 共享根 / 盘符根: 同时尝试"原样"与"补尾部反斜杠"两种写法,
+        # 不同系统对根路径的容错不同, 任一成功即可。
+        base = (path or "").rstrip("\\/")
+        cands = []
+        if path:
+            cands.append(path)
+        if base:
+            cands.append(base + "\\")
+        for p in cands:
+            ok = k32.GetDiskFreeSpaceExW(
+                ctypes.c_wchar_p(p),
+                ctypes.byref(avail),
+                ctypes.byref(total),
+                ctypes.byref(free),
+            )
+            if ok:
+                tb = total.value
+                fb = free.value
+                return {"total": tb, "free": fb, "used": tb - fb}
+        return None
+
+    def collect_nas_disks(self):
+        """采集配置的网络共享盘空间使用量, 返回列表。
+
+        每项: {path, label, ok, total_gb, used_gb, free_gb, percent} 或
+        失败项 {path, label, ok:false, error}。
+        """
+        shares = getattr(self, "nas_shares", None) or []
+        out = []
+        for entry in shares:
+            # 兼容 dict 写法({path, label})与字符串写法("路径" / "路径 | 标签")
+            if isinstance(entry, dict):
+                raw_path = str(entry.get("path", "")).strip()
+                label = str(entry.get("label", "")).strip()
+            else:
+                s = str(entry).strip()
+                if " | " in s:
+                    raw_path, label = s.split(" | ", 1)
+                    raw_path, label = raw_path.strip(), label.strip()
+                else:
+                    raw_path, label = s, ""
+            if not raw_path:
+                continue
+            rec = {"path": raw_path, "label": label, "ok": False}
+            info = self._query_unc_space(raw_path)
+            if info:
+                rec["ok"] = True
+                rec["total_gb"] = round(info["total"] / GB, 2)
+                rec["used_gb"] = round(info["used"] / GB, 2)
+                rec["free_gb"] = round(info["free"] / GB, 2)
+                rec["percent"] = round(info["used"] * 100.0 / info["total"], 1) if info["total"] else 0.0
+            else:
+                rec["error"] = "无法访问(服务身份可能无权限, 或路径不可达)"
+            out.append(rec)
+        return out
+

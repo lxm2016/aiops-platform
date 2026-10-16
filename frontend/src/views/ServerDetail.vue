@@ -137,6 +137,33 @@
       </el-table>
     </el-card>
 
+    <!-- 网络共享盘(华为存储 NAS) -->
+    <el-card class="tech-card" shadow="never" style="margin-top: 16px" v-if="rawDetail && rawDetail.nas_disks && rawDetail.nas_disks.length">
+      <template #header>网络共享盘（华为存储 NAS）</template>
+      <el-table :data="rawDetail.nas_disks" size="small">
+        <el-table-column label="名称" min-width="140">
+          <template #default="{ row }">{{ row.label || row.path }}</template>
+        </el-table-column>
+        <el-table-column prop="path" label="路径 (UNC / 盘符)" min-width="200" />
+        <el-table-column label="总容量" width="110">
+          <template #default="{ row }">{{ row.ok ? Number(row.total_gb || 0).toFixed(1) + ' GB' : '-' }}</template>
+        </el-table-column>
+        <el-table-column label="已用" width="110">
+          <template #default="{ row }">{{ row.ok ? Number(row.used_gb || 0).toFixed(1) + ' GB' : '-' }}</template>
+        </el-table-column>
+        <el-table-column label="使用率" min-width="180">
+          <template #default="{ row }">
+            <el-progress
+              v-if="row.ok"
+              :percentage="Math.min(100, Number(row.percent || 0))"
+              :color="percentColor(row.percent)"
+            />
+            <span v-else style="color: #f56c6c">{{ row.error || '采集失败' }}</span>
+          </template>
+        </el-table-column>
+      </el-table>
+    </el-card>
+
     <!-- 智能诊断抽屉（只读：只采集，不修改） -->
     <el-drawer v-model="diagVisible" title="智能诊断（只读排查）" size="62%" :destroy-on-close="true">
       <div v-loading="diagLoading">

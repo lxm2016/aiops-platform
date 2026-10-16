@@ -91,6 +91,8 @@ server:
 agent:
   interval: $INTERVAL
   timeout: 10
+nas_shares:
+  # 网络共享盘监控(华为存储等SMB共享盘): 在下方加 "- UNC路径" 行(格式见 agent/config.yaml 注释)
 EOF
 
 # ---------- 注册开机自启并启动 ----------
